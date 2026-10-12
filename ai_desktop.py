@@ -231,41 +231,54 @@ def _draw_label(draw: ImageDraw.ImageDraw, text: str, font, left: int, top: int)
     draw.text((left + LABEL_PAD - l, top + LABEL_PAD - t), text, font=font, fill=LABEL_FG)
 
 
-def draw_grid(img: Image.Image, spacing: int = DEFAULT_SPACING) -> Image.Image:
-    """Return a copy of `img` with lines every `spacing` px labeled with pixel coordinates.
+def draw_grid(
+    img: Image.Image,
+    spacing: int = DEFAULT_SPACING,
+    origin: tuple[int, int] = (0, 0),
+    label_scale: float = 1.0,
+) -> Image.Image:
+    """Return a copy of `img` with lines every `spacing` px labeled with screen coordinates.
 
-    X labels sit at the top of each vertical line, Y labels at the left of each horizontal
-    line, each centred on its line over a semi-transparent dark box.
+    `origin` is the global coordinate of the image's top-left pixel, so a capture that
+    starts at (-1920, 0) gets labels -1900, -1800, ... and lines sit on global multiples
+    of `spacing`. X labels sit at the top of each vertical line, Y labels at the left of
+    each horizontal line, over a semi-transparent dark box. `label_scale` enlarges the
+    labels, for an image that will be downscaled afterwards.
     """
     base = img.convert("RGBA")
     width, height = base.size
+    ox, oy = origin
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    font = load_font(max(14, min(width, height) // 60))
+    font = load_font(max(14, int(min(width, height) // 60 * label_scale)))
 
-    xs = range(spacing, width, spacing)
-    ys = range(spacing, height, spacing)
+    xs = [x for x in range((-ox) % spacing, width, spacing) if x > 0]
+    ys = [y for y in range((-oy) % spacing, height, spacing) if y > 0]
     for x in xs:
         draw.line([(x, 0), (x, height - 1)], fill=LINE_COLOR, width=1)
     for y in ys:
         draw.line([(0, y), (width - 1, y)], fill=LINE_COLOR, width=1)
 
-    # Size of the widest possible label decides how many lines to skip so labels never
-    # overlap, and keeps the top-left corner clear where the two label rows meet.
-    text_w, text_h = _text_size(draw, str(max(width, height)), font)
+    # The widest possible label decides how many lines to skip so labels never overlap,
+    # and keeps the top-left corner clear where the two label rows meet. Negative
+    # coordinates are wider than positive ones, so measure the real extremes.
+    candidates = [str(v) for v in (ox, ox + width, oy, oy + height)]
+    text_w = max(_text_size(draw, text, font)[0] for text in candidates)
+    text_h = _text_size(draw, "0123456789-", font)[1]
     box_w, box_h = text_w + 2 * LABEL_PAD, text_h + 2 * LABEL_PAD
     x_every = math.ceil((box_w + 4) / spacing)
     y_every = math.ceil((box_h + 4) / spacing)
 
     for i, x in enumerate(xs):
-        w = _text_size(draw, str(x), font)[0] + 2 * LABEL_PAD
+        label = str(ox + x)
+        w = _text_size(draw, label, font)[0] + 2 * LABEL_PAD
         left = x - w // 2
         if i % x_every == 0 and left >= box_w + 4 and left + w <= width:
-            _draw_label(draw, str(x), font, left, 1)
+            _draw_label(draw, label, font, left, 1)
     for i, y in enumerate(ys):
         top = y - box_h // 2
         if i % y_every == 0 and top >= box_h + 4 and top + box_h <= height:
-            _draw_label(draw, str(y), font, 1, top)
+            _draw_label(draw, str(oy + y), font, 1, top)
 
     return Image.alpha_composite(base, overlay).convert("RGB")
 
@@ -327,20 +340,274 @@ def grab_linux() -> Image.Image:
         os.remove(path)
 
 
-def capture_screen(backend: Backend) -> tuple[Image.Image, float]:
-    """Capture the screen at the backend's logical size, so image pixels == click coords.
+# --- Monitors ----------------------------------------------------------------------------
 
-    Returns the image and the original physical/logical scale (2.0 on a Retina display).
-    """
-    if sys.platform.startswith("linux"):
-        img = grab_linux()
-    else:
-        img = load_pyautogui().screenshot().convert("RGB")
-    width, height = backend.size()
-    scale = img.width / width
+
+class Monitor(NamedTuple):
+    index: int
+    name: str
+    x: int  # global logical coordinates, the same space `click` uses
+    y: int
+    width: int
+    height: int
+    primary: bool
+    scale: float  # physical / logical pixels of this display
+
+    def contains(self, x: int, y: int) -> bool:
+        return self.x <= x < self.x + self.width and self.y <= y < self.y + self.height
+
+    def rect(self) -> tuple[int, int, int, int]:
+        return self.x, self.y, self.x + self.width, self.y + self.height
+
+
+def union_rect(monitors: list[Monitor]) -> tuple[int, int, int, int]:
+    """Bounding box (left, top, right, bottom) of all monitors, in global coordinates."""
+    return (
+        min(m.x for m in monitors),
+        min(m.y for m in monitors),
+        max(m.x + m.width for m in monitors),
+        max(m.y + m.height for m in monitors),
+    )
+
+
+def order_monitors(found: list[Monitor]) -> list[Monitor]:
+    """Primary first as index 0, then top-to-bottom, left-to-right."""
+    ordered = sorted(found, key=lambda m: (not m.primary, m.y, m.x))
+    if ordered and not ordered[0].primary:
+        ordered[0] = ordered[0]._replace(primary=True)
+    return [m._replace(index=i) for i, m in enumerate(ordered)]
+
+
+XRANDR_MONITOR_RE = re.compile(r"^\s*\d+:\s*([+*]*)(\S+)\s+(\d+)/\d+x(\d+)/\d+\+(-?\d+)\+(-?\d+)")
+
+
+def parse_xrandr_monitors(text: str) -> list[Monitor]:
+    """Parse `xrandr --listmonitors` output; a `+` before the name marks the primary."""
+    found = []
+    for line in text.splitlines():
+        match = XRANDR_MONITOR_RE.match(line)
+        if match:
+            flags, name, width, height, x, y = match.groups()
+            found.append(Monitor(0, name, int(x), int(y), int(width), int(height), "+" in flags, 1.0))
+    return found
+
+
+def _monitors_linux() -> list[Monitor]:
+    """Monitors via xrandr; under Wayland, Xwayland reports the logical layout."""
+    if not shutil.which("xrandr"):
+        return []
+    try:
+        result = subprocess.run(
+            ["xrandr", "--listmonitors"], capture_output=True, text=True, timeout=5, env=host_env()
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return parse_xrandr_monitors(result.stdout) if result.returncode == 0 else []
+
+
+def _monitors_windows() -> list[Monitor]:
+    import ctypes
+    from ctypes import wintypes
+
+    class MONITORINFOEXW(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork", wintypes.RECT),
+            ("dwFlags", wintypes.DWORD),
+            ("szDevice", wintypes.WCHAR * 32),
+        ]
+
+    user32 = ctypes.windll.user32
+    try:
+        user32.SetProcessDPIAware()  # physical pixels everywhere, like pyautogui's clicks
+    except Exception:
+        pass
+    found: list[Monitor] = []
+    proc_type = ctypes.WINFUNCTYPE(
+        wintypes.BOOL, wintypes.HMONITOR, wintypes.HDC, ctypes.POINTER(wintypes.RECT), wintypes.LPARAM
+    )
+
+    def callback(hmon, hdc, rect, lparam):
+        info = MONITORINFOEXW()
+        info.cbSize = ctypes.sizeof(MONITORINFOEXW)
+        if user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            r = info.rcMonitor
+            name = info.szDevice.lstrip("\\.") or f"display-{len(found) + 1}"
+            # Capture and mouse both use physical pixels here, so the scale is 1.
+            found.append(
+                Monitor(0, name, r.left, r.top, r.right - r.left, r.bottom - r.top, bool(info.dwFlags & 1), 1.0)
+            )
+        return True
+
+    user32.EnumDisplayMonitors(None, None, proc_type(callback), 0)
+    return found
+
+
+def _monitors_macos() -> list[Monitor]:
+    import Quartz
+
+    err, ids, count = Quartz.CGGetActiveDisplayList(16, None, None)
+    if err:
+        return []
+    names: dict[int, str] = {}
+    try:
+        import AppKit
+
+        for screen in AppKit.NSScreen.screens():
+            number = screen.deviceDescription().get("NSScreenNumber")
+            if number is not None and screen.respondsToSelector_("localizedName"):
+                names[int(number)] = str(screen.localizedName())
+    except Exception:
+        pass
+    found = []
+    for i, display in enumerate(ids[:count]):
+        bounds = Quartz.CGDisplayBounds(display)  # logical points, same space as mouse events
+        width, height = int(bounds.size.width), int(bounds.size.height)
+        if not width or not height:
+            continue
+        scale = Quartz.CGDisplayPixelsWide(display) / width
+        found.append(
+            Monitor(
+                0, names.get(int(display), f"display-{i + 1}"), int(bounds.origin.x), int(bounds.origin.y),
+                width, height, bool(Quartz.CGDisplayIsMain(display)), round(scale, 3),
+            )
+        )
+    return found
+
+
+def detect_monitors(backend: Backend) -> tuple[list[Monitor], str]:
+    """Raw monitor list and its source: xrandr, win32, quartz, or fallback (one screen)."""
+    found: list[Monitor] = []
+    source = "fallback"
+    try:
+        if sys.platform == "win32":
+            found, source = _monitors_windows(), "win32"
+        elif sys.platform == "darwin":
+            found, source = _monitors_macos(), "quartz"
+        else:
+            found, source = _monitors_linux(), "xrandr"
+    except Exception:
+        found = []
+    if not found:
+        width, height = backend.size()
+        return [Monitor(0, "screen", 0, 0, width, height, True, 1.0)], "fallback"
+    return found, source
+
+
+def list_monitors(backend: Backend) -> list[Monitor]:
+    return order_monitors(detect_monitors(backend)[0])
+
+
+def monitor_at(monitors: list[Monitor], x: int, y: int) -> Monitor | None:
+    return next((m for m in monitors if m.contains(x, y)), None)
+
+
+def resolve_monitor(spec: str, monitors: list[Monitor]) -> Monitor | None:
+    """`all` -> None; `primary` or an index -> that monitor."""
+    spec = str(spec).strip().lower()
+    if spec == "all":
+        return None
+    if spec == "primary":
+        return next(m for m in monitors if m.primary)
+    try:
+        index = int(spec)
+    except ValueError as exc:
+        raise CliError(
+            f"--monitor must be all, primary or an index from 'ai-desktop monitors', not {spec!r}"
+        ) from exc
+    for m in monitors:
+        if m.index == index:
+            return m
+    raise CliError(f"no monitor {index}; run: ai-desktop monitors")
+
+
+class Capture(NamedTuple):
+    image: Image.Image
+    x: int  # global coordinates of the image's top-left pixel
+    y: int
+    scale: float  # physical / logical ratio of the capture before normalization
+    monitor: str  # "all" or the monitor index
+
+
+def _fit(img: Image.Image, width: int, height: int) -> tuple[Image.Image, float]:
+    """Resize a capture to its logical size; returns the image and the original ratio."""
+    scale = img.width / width if width else 1.0
     if img.size != (width, height):
         img = img.resize((width, height), Image.Resampling.LANCZOS)
     return img, scale
+
+
+def _capture_linux(backend: Backend, monitors: list[Monitor], target: Monitor | None) -> Capture:
+    img, scale = _fit(grab_linux(), *backend.size())
+    if target is None:
+        return Capture(img, 0, 0, scale, "all")  # the X root starts at (0, 0)
+    return Capture(img.crop(target.rect()), target.x, target.y, scale, str(target.index))
+
+
+def _capture_windows(monitors: list[Monitor], target: Monitor | None) -> Capture:
+    if target is None:
+        left, top, right, bottom = union_rect(monitors)
+        label = "all"
+    else:
+        left, top, right, bottom = target.rect()
+        label = str(target.index)
+    img = ImageGrab.grab(bbox=(left, top, right, bottom), all_screens=True).convert("RGB")
+    img, scale = _fit(img, right - left, bottom - top)
+    return Capture(img, left, top, scale, label)
+
+
+def _screencapture_rect(x: int, y: int, width: int, height: int) -> Image.Image:
+    """One display region via macOS screencapture, run by us so nothing touches stdout."""
+    fd, path = tempfile.mkstemp(prefix="ai_desktop_", suffix=".png")
+    os.close(fd)
+    try:
+        # -R takes its value attached: a separate "-1920,0,..." would be read as a flag.
+        result = subprocess.run(
+            ["screencapture", "-x", f"-R{x},{y},{width},{height}", path],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode != 0 or os.path.getsize(path) == 0:
+            detail = result.stderr.strip() or f"exit code {result.returncode}"
+            raise CliError(f"screencapture failed: {detail}; is Screen Recording granted?")
+        with Image.open(path) as img:
+            return img.convert("RGB")
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
+
+def _capture_macos(monitors: list[Monitor], target: Monitor | None) -> Capture:
+    targets = monitors if target is None else [target]
+    pieces = []
+    for m in targets:
+        img, scale = _fit(_screencapture_rect(m.x, m.y, m.width, m.height), m.width, m.height)
+        pieces.append((m, img, scale))
+    if target is not None:
+        m, img, scale = pieces[0]
+        return Capture(img, m.x, m.y, scale, str(m.index))
+    left, top, right, bottom = union_rect(monitors)
+    canvas = Image.new("RGB", (right - left, bottom - top), (0, 0, 0))
+    for m, img, _ in pieces:
+        canvas.paste(img, (m.x - left, m.y - top))
+    return Capture(canvas, left, top, max(scale for _, _, scale in pieces), "all")
+
+
+def capture_screen(backend: Backend, monitor: str = "all") -> Capture:
+    """Capture all monitors (or one) at logical size.
+
+    Image pixel (px, py) is screen point (x + px, y + py), so grid labels can show the
+    coordinates `click` needs even for a monitor left of the primary (negative x).
+    """
+    monitors = list_monitors(backend)
+    target = resolve_monitor(monitor, monitors)
+    if sys.platform == "win32":
+        return _capture_windows(monitors, target)
+    if sys.platform == "darwin":
+        return _capture_macos(monitors, target)
+    return _capture_linux(backend, monitors, target)
 
 
 # --- Screenshot store --------------------------------------------------------------------
@@ -618,11 +885,12 @@ class Backend:
         raise NotImplementedError
 
     def check_point(self, x: int, y: int) -> None:
-        width, height = self.size()
-        if not (0 <= x < width and 0 <= y < height):
-            raise CliError(
-                f"({x}, {y}) is off screen; valid range is x 0..{width - 1}, y 0..{height - 1}"
+        monitors = list_monitors(self)
+        if monitor_at(monitors, x, y) is None:
+            where = "; ".join(
+                f"{m.index} {m.name} at {m.x},{m.y} size {m.width}x{m.height}" for m in monitors
             )
+            raise CliError(f"({x}, {y}) is on no monitor; monitors: {where}")
 
 
 class PyAutoGuiBackend(Backend):
@@ -1333,9 +1601,30 @@ def run_doctor(backend_name: str) -> list[Check]:
     if backend is not None:
         checks.append(run_check("screen-size", lambda: ("ok", "%dx%d logical px" % backend.size())))
 
+        def _monitors():
+            found, source = detect_monitors(backend)
+            desc = ", ".join(
+                f"{m.name} {m.width}x{m.height}+{m.x}+{m.y}" + (" (primary)" if m.primary else "")
+                for m in order_monitors(found)
+            )
+            if source == "fallback":
+                return (
+                    "warn",
+                    f"1 monitor assumed: {desc}",
+                    "the display layout could not be queried (xrandr missing?); "
+                    "a second monitor would be invisible to screenshot and click",
+                )
+            return "ok", f"{len(found)} via {source}: {desc}"
+
+        checks.append(run_check("monitors", _monitors))
+
         def _capture():
-            img, scale = capture_screen(backend)
-            return "ok", f"{img.width}x{img.height}, scale {scale:g} (the screen may flash once)"
+            cap = capture_screen(backend)
+            return (
+                "ok",
+                f"{cap.image.width}x{cap.image.height} at {cap.x},{cap.y}, scale {cap.scale:g} "
+                "(the screen may flash once)",
+            )
 
         checks.append(run_check("screenshot", _capture))
     checks.append(run_check("clipboard", _check_clipboard))
@@ -1349,10 +1638,12 @@ def run_doctor(backend_name: str) -> list[Check]:
 
 def cmd_screenshot(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
-    img, scale = capture_screen(backend)
+    cap = capture_screen(backend, args.monitor)
+    img = cap.image
     if args.grid:
-        img = draw_grid(img, args.spacing)
-    path = save_image(img, args.output or new_screenshot_path(args.grid, args.spacing))
+        img = draw_grid(img, args.spacing, origin=(cap.x, cap.y))
+    tag = "" if cap.monitor == "all" else f"-m{cap.monitor}"
+    path = save_image(img, args.output or new_screenshot_path(args.grid, args.spacing, tag))
     # Prune after saving: the capture has already succeeded, and the new file is never a
     # candidate. Explicit -o paths live outside the store and are never pruned.
     pruned = prune_if_due() if args.output is None else None
@@ -1361,11 +1652,36 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         path=path,
         width=img.width,
         height=img.height,
+        x=cap.x,
+        y=cap.y,
+        monitor=cap.monitor,
         spacing=args.spacing if args.grid else "none",
-        scale=round(scale, 3),
+        scale=round(cap.scale, 3),
         backend=backend.name,
         pruned="skipped" if pruned is None else len(pruned),
     )
+
+
+def cmd_monitors(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    found, source = detect_monitors(backend)
+    monitors = order_monitors(found)
+    left, top, right, bottom = union_rect(monitors)
+    status(
+        "monitors",
+        count=len(monitors),
+        primary=next(m.index for m in monitors if m.primary),
+        virtual_x=left,
+        virtual_y=top,
+        virtual_width=right - left,
+        virtual_height=bottom - top,
+        source=source,
+        monitors=[m._asdict() for m in monitors],
+    )
+    if text_mode():
+        for m in monitors:
+            primary = " primary" if m.primary else ""
+            print(f"{m.index} {m.name} {m.x},{m.y} {m.width}x{m.height}{primary} scale={m.scale:g}")
 
 
 def cmd_screenshots(args: argparse.Namespace) -> None:
@@ -1543,8 +1859,18 @@ def cmd_clipboard(args: argparse.Namespace) -> None:
 def cmd_position(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     width, height = backend.size()
-    x, y = backend.position() or ("unknown", "unknown")
-    status("position", x=x, y=y, width=width, height=height, backend=backend.name)
+    pos = backend.position()
+    hit = monitor_at(list_monitors(backend), *pos) if pos else None
+    x, y = pos or ("unknown", "unknown")
+    status(
+        "position",
+        x=x,
+        y=y,
+        monitor=hit.index if hit else "none",
+        width=width,
+        height=height,
+        backend=backend.name,
+    )
 
 
 def cmd_launch_chrome(args: argparse.Namespace) -> None:
@@ -1658,12 +1984,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--grid", action="store_true", help="overlay labeled grid lines")
     p.add_argument("--spacing", type=_spacing, default=DEFAULT_SPACING, help="grid spacing in px (default 100)")
     p.add_argument(
+        "--monitor",
+        default="all",
+        help="all (default: every monitor in one image), primary, or an index from 'ai-desktop monitors'",
+    )
+    p.add_argument(
         "-o",
         "--output",
         help="output path (default: a timestamped file in the screenshot store, "
         "see 'screenshots dir'; files given here are never auto-deleted)",
     )
     p.set_defaults(func=cmd_screenshot)
+
+    p = add("monitors", help="list monitors with their global coordinates")
+    p.set_defaults(func=cmd_monitors)
 
     p = add("grid", help="draw a coordinate grid on an existing image")
     p.add_argument("--input", required=True, help="image to annotate")

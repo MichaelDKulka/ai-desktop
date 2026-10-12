@@ -20,11 +20,11 @@ class FakeGui:
 
 
 def test_capture_normalizes_hidpi_to_logical_size(monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(ad, "grab_linux", lambda: FakeGui.screenshot().convert("RGB"))
-    monkeypatch.setattr(ad, "load_pyautogui", lambda: FakeGui)
-    img, scale = ad.capture_screen(FakeBackend())
-    assert img.size == (1920, 1080) and img.mode == "RGB"
-    assert scale == 2.0
+    cap = ad.capture_screen(FakeBackend())
+    assert cap.image.size == (1920, 1080) and cap.image.mode == "RGB"
+    assert cap.scale == 2.0 and (cap.x, cap.y) == (0, 0) and cap.monitor == "all"
 
 
 def test_find_screenshot_tool(monkeypatch):

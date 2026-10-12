@@ -25,9 +25,9 @@ def test_bounds_and_failsafe_corners(fake_gui):
     for x, y in ((0, 0), (1919, 0), (0, 1079), (1919, 1079)):
         with pytest.raises(ad.CliError, match="failsafe corner"):
             backend.check_point(x, y)
-    with pytest.raises(ad.CliError, match="off screen"):
+    with pytest.raises(ad.CliError, match="no monitor"):
         backend.check_point(1920, 5)
-    with pytest.raises(ad.CliError, match="off screen"):
+    with pytest.raises(ad.CliError, match="no monitor"):
         backend.check_point(-1, 5)
     backend.check_point(1, 1)
     backend.check_point(1918, 1079)
@@ -92,7 +92,7 @@ def test_failsafe_during_an_action(run, fake_gui):
 
 def test_position(run, fake_gui):
     _, out, _ = run("position")
-    assert out == "OK position x=10 y=20 width=1920 height=1080 backend=pyautogui\n"
+    assert out == "OK position x=10 y=20 monitor=0 width=1920 height=1080 backend=pyautogui\n"
 
 
 def test_missing_pyautogui_is_a_clean_error(run, monkeypatch):

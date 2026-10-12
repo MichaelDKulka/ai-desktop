@@ -116,17 +116,21 @@ def test_prune_if_due_runs_at_most_hourly():
     assert ad.prune_if_due() == [second]
 
 
+def fake_capture(backend, monitor="all"):
+    return ad.Capture(Image.new("RGB", (64, 48)), 0, 0, 1.0, "all")
+
+
 def test_screenshot_goes_into_the_store(run, fake_gui, monkeypatch):
-    monkeypatch.setattr(ad, "capture_screen", lambda backend: (Image.new("RGB", (64, 48)), 1.0))
+    monkeypatch.setattr(ad, "capture_screen", fake_capture)
     code, out, _ = run("screenshot", "--grid", "--spacing", "20")
-    assert code == 0 and "width=64 height=48 spacing=20" in out and "pruned=0" in out
+    assert code == 0 and "width=64 height=48 " in out and " spacing=20 " in out and "pruned=0" in out
     files = ad.store_files()
     assert len(files) == 1 and files[0][0].name.endswith("-grid20.png")
     assert (ad.store_dir() / ad.PRUNE_MARKER).exists()
 
 
 def test_screenshot_explicit_output_is_outside_the_store(run, fake_gui, monkeypatch, tmp_path):
-    monkeypatch.setattr(ad, "capture_screen", lambda backend: (Image.new("RGB", (64, 48)), 1.0))
+    monkeypatch.setattr(ad, "capture_screen", fake_capture)
     target = tmp_path / "mine.png"
     code, out, _ = run("screenshot", "-o", str(target))
     assert code == 0 and target.exists() and "pruned=skipped" in out

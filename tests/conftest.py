@@ -11,9 +11,17 @@ from PIL import Image
 import ai_desktop
 
 
+REAL_DETECT_MONITORS = ai_desktop.detect_monitors
+FAKE_MONITOR = ai_desktop.Monitor(0, "fake", 0, 0, 1920, 1080, True, 1.0)
+
+
 @pytest.fixture(autouse=True)
 def isolate(monkeypatch, tmp_path):
-    """Keep every test off the real desktop and the real screenshot store."""
+    """Keep every test off the real desktop and the real screenshot store.
+
+    Monitor detection is replaced by one 1920x1080 primary (fake_gui's size), so no
+    test spawns xrandr or queries the real display layout.
+    """
     monkeypatch.setenv("AI_DESKTOP_HOME", str(tmp_path / "home"))
     for var in list(os.environ):
         if var.startswith(("AI_DESKTOP_", "SNAP")) and var != "AI_DESKTOP_HOME":
@@ -22,6 +30,12 @@ def isolate(monkeypatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(ai_desktop, "JSON_OUTPUT", False)
     monkeypatch.setattr(ai_desktop, "CURRENT_COMMAND", None)
+    monkeypatch.setattr(ai_desktop, "detect_monitors", lambda backend: ([FAKE_MONITOR], "fake"))
+
+
+@pytest.fixture
+def real_detect_monitors():
+    return REAL_DETECT_MONITORS
 
 
 def _recorder(calls, name):
