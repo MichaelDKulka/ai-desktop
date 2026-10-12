@@ -1407,7 +1407,7 @@ def find_desktop_entry(ids: tuple[str, ...]) -> tuple[str, str] | None:
     """(id, path) of the first installed .desktop entry among `ids`, or None."""
     data_dirs = host_env().get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
     folders = [Path.home() / ".local/share/applications"]
-    folders += [Path(d) / "applications" for d in data_dirs.split(":") if d]
+    folders += [Path(d) / "applications" for d in data_dirs.split(os.pathsep) if d]
     for app_id in ids:
         for folder in folders:
             path = folder / f"{app_id}.desktop"
