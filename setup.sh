@@ -1,18 +1,21 @@
 #!/usr/bin/env bash
 # One-shot setup for macOS and Linux: virtualenv, install, Linux extras, then doctor.
 #   ./setup.sh          install
+#   ./setup.sh --mcp    also install the MCP server extra (Python 3.10+)
 #   ./setup.sh --dev    also install pytest
 #   ./setup.sh --yes    run the Linux sudo steps without asking
 set -euo pipefail
 cd "$(dirname "$0")"
 
 DEV=0
+MCP=0
 YES=0
 for arg in "$@"; do
   case "$arg" in
     --dev) DEV=1 ;;
+    --mcp) MCP=1 ;;
     --yes | -y) YES=1 ;;
-    -h | --help) sed -n '2,5p' "$0"; exit 0 ;;
+    -h | --help) sed -n '2,6p' "$0"; exit 0 ;;
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -45,11 +48,10 @@ if [ ! -x .venv/bin/python ]; then
   "$PY" -m venv .venv
 fi
 .venv/bin/python -m pip install --quiet --upgrade pip
-if [ "$DEV" = 1 ]; then
-  .venv/bin/python -m pip install --quiet -e ".[dev]"
-else
-  .venv/bin/python -m pip install --quiet -e .
-fi
+EXTRAS=""
+[ "$DEV" = 1 ] && EXTRAS="dev"
+[ "$MCP" = 1 ] && EXTRAS="${EXTRAS:+$EXTRAS,}mcp"
+.venv/bin/python -m pip install --quiet -e ".${EXTRAS:+[$EXTRAS]}"
 echo "Installed $(.venv/bin/ai-desktop --version) into .venv"
 
 # --- Linux extras ------------------------------------------------------------------------

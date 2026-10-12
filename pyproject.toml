@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-desktop"
-version = "0.2.0"
+version = "0.3.0"
 description = "CLI that lets any AI agent see the screen through a coordinate grid and control the mouse, keyboard and clipboard"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -24,6 +24,8 @@ dependencies = ["pyautogui>=0.9.54", "pillow>=10.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "build"]
+# The MCP server (`ai-desktop mcp`); the SDK needs Python 3.10+, the core stays on 3.9.
+mcp = ["mcp>=2; python_version >= '3.10'"]
 
 [project.urls]
 Homepage = "https://github.com/MichaelDKulka/ai-desktop"
@@ -35,7 +37,7 @@ Changelog = "https://github.com/MichaelDKulka/ai-desktop/blob/main/CHANGELOG.md"
 ai-desktop = "ai_desktop:main"
 
 [tool.setuptools]
-py-modules = ["ai_desktop"]
+py-modules = ["ai_desktop", "ai_desktop_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

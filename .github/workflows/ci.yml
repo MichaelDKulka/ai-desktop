@@ -24,8 +24,14 @@ jobs:
           python-version: ${{ matrix.python }}
 
       # Proves the dependencies resolve and install on this OS (pyobjc on macOS, Xlib on Linux).
+      # The MCP extra needs Python 3.10+, so only the 3.12 rows install and test it.
       - name: Install
-        run: python -m pip install -e ".[dev]"
+        run: |
+          if [ "${{ matrix.python }}" = "3.12" ]; then
+            python -m pip install -e ".[dev,mcp]"
+          else
+            python -m pip install -e ".[dev]"
+          fi
 
       - name: Unit tests (headless)
         run: pytest -q
@@ -34,11 +40,22 @@ jobs:
         run: |
           ai-desktop --version
           ai-desktop --help
+          ai-desktop mcp --help
           python -c "from PIL import Image; Image.new('RGB', (640, 400), (230, 230, 230)).save('s.png')"
           ai-desktop grid --input s.png -o g.png --spacing 50
           ai-desktop --json grid --input s.png | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'] and d['width'] == 640, d"
+          ai-desktop --json log | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'] and d['count'] >= 1, d"
           ai-desktop screenshots dir
           ai-desktop screenshots clean --all
+
+      # These need a desktop but no permissions, so they must pass on the mac/windows runners.
+      - name: Monitors and windows (live desktop)
+        if: runner.os != 'Linux'
+        run: |
+          ai-desktop monitors
+          ai-desktop --json monitors | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'] and d['count'] >= 1, d"
+          ai-desktop windows
+          ai-desktop --json windows | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'], d"
 
       # Informational: runners have no desktop (Linux) or no permissions (macOS), so some rows fail.
       - name: Doctor
@@ -49,7 +66,10 @@ jobs:
         if: runner.os != 'Linux'
         run: |
           ai-desktop screenshot --grid
+          ai-desktop screenshot --monitor all --grid
+          ai-desktop screenshot --monitor primary
           ai-desktop screenshots list
+          ai-desktop log --limit 5
         continue-on-error: true
 
       - name: Live X11 smoke test under Xvfb
@@ -58,6 +78,8 @@ jobs:
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb
           xvfb-run -a ai-desktop position
+          xvfb-run -a ai-desktop monitors
+          xvfb-run -a ai-desktop windows
           xvfb-run -a ai-desktop move --x 10 --y 10
           xvfb-run -a ai-desktop screenshot --grid
         continue-on-error: true

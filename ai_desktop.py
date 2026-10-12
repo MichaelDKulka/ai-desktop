@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 DEFAULT_SPACING = 100
 MIN_SPACING = 10
@@ -2138,6 +2138,16 @@ def cmd_screenshots(args: argparse.Namespace) -> None:
         )
 
 
+def cmd_mcp(args: argparse.Namespace) -> None:
+    try:
+        import ai_desktop_mcp
+    except ImportError as exc:
+        raise CliError(
+            "the MCP server needs Python 3.10+ and the mcp extra: pip install 'ai-desktop[mcp]'"
+        ) from exc
+    ai_desktop_mcp.serve(max_width=args.max_width)
+
+
 def cmd_log(args: argparse.Namespace) -> None:
     entries = read_log_entries(args.limit)
     status("log", path=str(log_dir()), count=len(entries), entries=entries)
@@ -2521,6 +2531,15 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("log", help="show recent entries from the action log, newest first")
     p.add_argument("--limit", type=_positive_int, default=20, help="how many entries (default 20)")
     p.set_defaults(func=cmd_log)
+
+    p = add("mcp", help="run as an MCP server over stdio (needs: pip install 'ai-desktop[mcp]')")
+    p.add_argument(
+        "--max-width",
+        type=int,
+        default=1920,
+        help="downscale inline screenshots wider than this many px (default 1920; 0 = never)",
+    )
+    p.set_defaults(func=cmd_mcp)
     return parser
 
 

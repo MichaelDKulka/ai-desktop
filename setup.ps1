@@ -1,8 +1,9 @@
 # One-shot setup for Windows: virtualenv, install, then doctor.
 # Run from the repo folder in PowerShell:
 #   powershell -ExecutionPolicy Bypass -File setup.ps1          install
+#   powershell -ExecutionPolicy Bypass -File setup.ps1 -Mcp     also install the MCP server extra
 #   powershell -ExecutionPolicy Bypass -File setup.ps1 -Dev     also install pytest
-param([switch]$Dev)
+param([switch]$Dev, [switch]$Mcp)
 
 $ErrorActionPreference = "Stop"
 Set-Location -Path $PSScriptRoot
@@ -34,11 +35,11 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     & $pyExe @pyArgs -m venv .venv
 }
 & .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-if ($Dev) {
-    & .venv\Scripts\python.exe -m pip install --quiet -e ".[dev]"
-} else {
-    & .venv\Scripts\python.exe -m pip install --quiet -e .
-}
+$extras = @()
+if ($Dev) { $extras += "dev" }
+if ($Mcp) { $extras += "mcp" }
+$spec = if ($extras) { ".[" + ($extras -join ",") + "]" } else { "." }
+& .venv\Scripts\python.exe -m pip install --quiet -e $spec
 Write-Host "Installed $(& .venv\Scripts\ai-desktop.exe --version) into .venv"
 
 # --- Doctor ------------------------------------------------------------------------------

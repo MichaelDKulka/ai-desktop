@@ -30,6 +30,7 @@ def isolate(monkeypatch, tmp_path):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setattr(ai_desktop, "JSON_OUTPUT", False)
     monkeypatch.setattr(ai_desktop, "CURRENT_COMMAND", None)
+    monkeypatch.setattr(ai_desktop, "LOG_VIA", "cli")
     monkeypatch.setattr(ai_desktop, "detect_monitors", lambda backend: ([FAKE_MONITOR], "fake"))
 
 
