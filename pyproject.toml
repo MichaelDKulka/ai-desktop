@@ -1,18 +1,42 @@
 [build-system]
-requires = ["setuptools>=61"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-desktop"
-version = "0.1.0"
-description = "CLI that lets an AI agent see the screen with a coordinate grid and control the mouse and keyboard"
+version = "0.2.0"
+description = "CLI that lets any AI agent see the screen through a coordinate grid and control the mouse, keyboard and clipboard"
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Michael Kulka" }]
+keywords = ["ai", "agent", "desktop", "automation", "screenshot", "pyautogui", "computer-use"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Libraries",
+]
 dependencies = ["pyautogui>=0.9.54", "pillow>=10.1"]
+
+[project.optional-dependencies]
+dev = ["pytest>=7", "build"]
+
+[project.urls]
+Homepage = "https://github.com/MichaelDKulka/ai-desktop"
+Repository = "https://github.com/MichaelDKulka/ai-desktop"
+Issues = "https://github.com/MichaelDKulka/ai-desktop/issues"
+Changelog = "https://github.com/MichaelDKulka/ai-desktop/blob/main/CHANGELOG.md"
 
 [project.scripts]
 ai-desktop = "ai_desktop:main"
 
 [tool.setuptools]
 py-modules = ["ai_desktop"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
