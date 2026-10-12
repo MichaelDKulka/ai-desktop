@@ -28,7 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
 __version__ = "0.2.0"
 
@@ -276,7 +276,15 @@ def grab_linux() -> Image.Image:
                 "no Wayland screenshot tool found; install one: "
                 "sudo apt install gnome-screenshot (GNOME), grim (Sway/Hyprland) or spectacle (KDE)"
             )
-        return load_pyautogui().screenshot().convert("RGB")  # X11: Pillow's XCB grab
+        # X11 without a tool: Pillow's own XCB capture. pyautogui's screenshot() is no use
+        # here, since it refuses to run on Linux unless gnome-screenshot is installed.
+        try:
+            return ImageGrab.grab(xdisplay=os.environ.get("DISPLAY")).convert("RGB")
+        except OSError as exc:
+            raise CliError(
+                f"cannot capture the X11 screen: {exc}; install a screenshot tool: "
+                "sudo apt install gnome-screenshot"
+            ) from exc
     fd, path = tempfile.mkstemp(prefix="ai_desktop_", suffix=".png")
     os.close(fd)
     try:
@@ -1067,7 +1075,11 @@ def _check_linux_screenshot_tool():
             "none found",
             "sudo apt install gnome-screenshot (GNOME), grim (Sway/Hyprland) or spectacle (KDE)",
         )
-    return "warn", "none found; using pyautogui", "sudo apt install gnome-screenshot for a more reliable capture"
+    return (
+        "warn",
+        "none found; using Pillow's X11 capture",
+        "sudo apt install gnome-screenshot for a more reliable capture",
+    )
 
 
 def _check_uinput():

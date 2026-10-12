@@ -15,7 +15,8 @@
 - **`--json`** (or `AI_DESKTOP_JSON=1`) makes every command print one JSON object, errors
   included. Global flags now work before or after the subcommand. **`--version`** added.
 - **Linux X11** captures through `gnome-screenshot` (or `grim`/`spectacle`) when
-  installed, falling back to pyautogui.
+  installed, falling back to Pillow's X11 capture (pyautogui's own screenshot refuses to
+  run on Linux without gnome-screenshot).
 - `setup.sh` / `setup.ps1` one-shot installers, `AGENTS.md` instructions for any AI agent,
   a headless test suite, CI on Windows/macOS/Linux, and a PyPI release workflow.
 

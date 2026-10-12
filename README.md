@@ -226,7 +226,7 @@ Other notes:
 - Nothing else to install: the clipboard uses PowerShell, which is built in.
 
 ### Linux on X11
-In an X11 session, such as **"Ubuntu on Xorg"** picked from the gear icon on the login screen, input goes through pyautogui exactly as on Windows and macOS, failsafe included. Screenshots use `gnome-screenshot` (or `grim`/`spectacle`) when installed and pyautogui otherwise. Install `xclip` for the clipboard.
+In an X11 session, such as **"Ubuntu on Xorg"** picked from the gear icon on the login screen, input goes through pyautogui exactly as on Windows and macOS, failsafe included. Screenshots use `gnome-screenshot` (or `grim`/`spectacle`) when installed and Pillow's own X11 capture otherwise. Install `xclip` for the clipboard.
 
 ### Linux on Wayland
 pyautogui can't see or control native Wayland windows, so on Wayland the tool switches automatically:

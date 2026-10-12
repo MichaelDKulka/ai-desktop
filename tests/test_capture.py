@@ -34,11 +34,30 @@ def test_find_screenshot_tool(monkeypatch):
     assert ad.find_screenshot_tool() is None
 
 
-def test_grab_linux_on_x11_falls_back_to_pyautogui(monkeypatch):
+def test_grab_linux_on_x11_falls_back_to_pillow(monkeypatch):
     monkeypatch.setattr(ad.shutil, "which", lambda n: None)
-    monkeypatch.setattr(ad, "load_pyautogui", lambda: FakeGui)
+    monkeypatch.setenv("DISPLAY", ":9")
+    seen = {}
+
+    def grab(xdisplay=None):
+        seen["xdisplay"] = xdisplay
+        return Image.new("RGBA", (3840, 2160))
+
+    monkeypatch.setattr(ad.ImageGrab, "grab", grab)
     img = ad.grab_linux()
     assert img.mode == "RGB" and img.size == (3840, 2160)
+    assert seen["xdisplay"] == ":9"
+
+
+def test_grab_linux_on_x11_reports_capture_errors(monkeypatch):
+    monkeypatch.setattr(ad.shutil, "which", lambda n: None)
+
+    def grab(xdisplay=None):
+        raise OSError("Pillow was built without XCB support")
+
+    monkeypatch.setattr(ad.ImageGrab, "grab", grab)
+    with pytest.raises(ad.CliError, match="cannot capture the X11 screen"):
+        ad.grab_linux()
 
 
 def test_grab_linux_on_wayland_needs_a_tool(monkeypatch):
