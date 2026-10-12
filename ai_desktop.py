@@ -12,6 +12,8 @@ of every account that is logged in on it. See README.md before using it.
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -44,9 +46,14 @@ PRUNE_MARKER = ".last-prune"
 EXIT_ERROR = 1
 EXIT_FAILSAFE = 3
 
-# Set by main(): --json or AI_DESKTOP_JSON=1 makes every result a single JSON object.
+# Set by execute(): --json or AI_DESKTOP_JSON=1 makes every result a single JSON object;
+# QUIET suppresses all printing (the MCP server runs commands in-process); the last
+# payload is kept for the action log; LOG_VIA says who ran the command.
 JSON_OUTPUT = False
+QUIET = False
 CURRENT_COMMAND: str | None = None
+LAST_PAYLOAD: dict | None = None
+LOG_VIA = "cli"
 
 # Characters `type` can enter on every backend: printable ASCII plus newline and tab.
 TYPEABLE = {chr(c) for c in range(32, 127)} | {"\n", "\t"}
@@ -88,16 +95,9 @@ class CliError(Exception):
         self.fields = fields
 
 
-def status(cmd: str, **fields) -> None:
-    """Print a one-line, machine-parseable result: `OK <cmd> key=value ...`.
-
-    In JSON mode it prints one object instead. List and dict values only appear in JSON,
-    so the text form stays a flat line.
-    """
-    if JSON_OUTPUT:
-        print(json.dumps({"ok": True, "command": cmd, **fields}, default=str), flush=True)
-        return
-    parts = ["OK", cmd]
+def format_fields(fields: dict) -> str:
+    """`key=value` pairs on one line; values with spaces are quoted, lists/dicts skipped."""
+    parts = []
     for key, value in fields.items():
         if isinstance(value, (list, dict)):
             continue
@@ -105,14 +105,41 @@ def status(cmd: str, **fields) -> None:
         if not text or any(c.isspace() for c in text):
             text = f'"{text}"'
         parts.append(f"{key}={text}")
-    print(" ".join(parts), flush=True)
+    return " ".join(parts)
+
+
+def text_mode() -> bool:
+    """True when the plain OK/ERROR text form is being printed (not JSON, not quiet)."""
+    return not (JSON_OUTPUT or QUIET)
+
+
+def status(cmd: str, **fields) -> None:
+    """Print a one-line, machine-parseable result: `OK <cmd> key=value ...`.
+
+    In JSON mode it prints one object instead. List and dict values only appear in JSON,
+    so the text form stays a flat line. Fields must not be named `ok` or `command`.
+    """
+    global LAST_PAYLOAD
+    payload = {"ok": True, "command": cmd, **fields}
+    LAST_PAYLOAD = payload
+    if QUIET:
+        return
+    if JSON_OUTPUT:
+        print(json.dumps(payload, default=str), flush=True)
+        return
+    extra = format_fields(fields)
+    print(f"OK {cmd}" + (f" {extra}" if extra else ""), flush=True)
 
 
 def fail(message: str, code: int = EXIT_ERROR, **fields) -> int:
     """Report an error (`ERROR ...` on stderr, or a JSON object on stdout) and return `code`."""
+    global LAST_PAYLOAD
+    payload = {"ok": False, "command": CURRENT_COMMAND, "error": message, "code": code, **fields}
+    LAST_PAYLOAD = payload
+    if QUIET:
+        return code
     if JSON_OUTPUT:
-        obj = {"ok": False, "command": CURRENT_COMMAND, "error": message, "code": code, **fields}
-        print(json.dumps(obj, default=str), flush=True)
+        print(json.dumps(payload, default=str), flush=True)
     else:
         print(f"ERROR {message}", file=sys.stderr, flush=True)
     return code
@@ -318,21 +345,27 @@ def capture_screen(backend: Backend) -> tuple[Image.Image, float]:
 
 # --- Screenshot store --------------------------------------------------------------------
 
-# Only files the tool named itself are ever deleted: YYYYmmdd-HHMMSS-mmm[-N][-gridS].png
-STORE_NAME_RE = re.compile(r"^\d{8}-\d{6}-\d{3}(-\d+)?(-grid\d+)?\.png$")
+# Only files the tool named itself are ever deleted: YYYYmmdd-HHMMSS-mmm[-N][-mM][-gridS].png
+STORE_NAME_RE = re.compile(r"^\d{8}-\d{6}-\d{3}(-\d+)?(-m\d+)?(-grid\d+)?\.png$")
+
+
+def home_dir() -> Path:
+    """`~/.ai-desktop`, or `$AI_DESKTOP_HOME`: screenshots and logs live under it."""
+    return Path(os.environ.get("AI_DESKTOP_HOME") or Path.home() / ".ai-desktop").expanduser()
 
 
 def store_dir() -> Path:
-    """`~/.ai-desktop/screenshots`, or `$AI_DESKTOP_HOME/screenshots`."""
-    home = os.environ.get("AI_DESKTOP_HOME") or Path.home() / ".ai-desktop"
-    return Path(home).expanduser() / "screenshots"
+    return home_dir() / "screenshots"
 
 
-def new_screenshot_path(grid: bool, spacing: int) -> Path:
-    """A path in the store named after the local time, that doesn't exist yet."""
+def new_screenshot_path(grid: bool, spacing: int, tag: str = "") -> Path:
+    """A path in the store named after the local time, that doesn't exist yet.
+
+    `tag` marks single-monitor captures (`-m1`); the grid suffix comes last.
+    """
     now = datetime.now()
     stem = now.strftime("%Y%m%d-%H%M%S") + f"-{now.microsecond // 1000:03d}"
-    suffix = f"-grid{spacing}" if grid else ""
+    suffix = tag + (f"-grid{spacing}" if grid else "")
     folder = store_dir()
     path = folder / f"{stem}{suffix}.png"
     n = 0
@@ -419,6 +452,8 @@ def prune_if_due() -> list[Path] | None:
     keep_mb = keep_setting("AI_DESKTOP_KEEP_MB", DEFAULT_KEEP_MB)
     try:
         removed = prune_store(keep_days, keep_mb)
+        prune_logs(keep_days)
+        marker.parent.mkdir(parents=True, exist_ok=True)
         marker.touch()
     except OSError:
         return None
@@ -433,6 +468,133 @@ def _setting_text(value: float | None) -> str | int | float:
 
 def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).isoformat(timespec="seconds")
+
+
+# --- Action log --------------------------------------------------------------------------
+
+LOG_NAME_RE = re.compile(r"^actions-\d{8}\.jsonl$")
+UNLOGGED_COMMANDS = ("log", "mcp")
+
+
+def log_dir() -> Path:
+    return home_dir() / "logs"
+
+
+def log_enabled() -> bool:
+    return os.environ.get("AI_DESKTOP_LOG", "").strip().lower() not in ("0", "false", "off", "no")
+
+
+def log_text_enabled() -> bool:
+    return os.environ.get("AI_DESKTOP_LOG_TEXT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def redact_log_fields(arg_dict: dict, result: dict) -> None:
+    """Keep typed, pasted and copied text out of the log unless AI_DESKTOP_LOG_TEXT=1.
+
+    `type --text`, `paste --text` and `clipboard set --text` become a character count;
+    the text printed by `copy` and `clipboard get` is dropped (its `chars` stays).
+    """
+    if log_text_enabled():
+        return
+    if isinstance(arg_dict.get("text"), str):
+        arg_dict["text_chars"] = len(arg_dict.pop("text"))
+    result.pop("text", None)
+
+
+def log_action(args: argparse.Namespace, code: int, payload: dict | None, started: float) -> None:
+    """Append one JSON line for a finished command. Never raises and never prints."""
+    try:
+        if not log_enabled() or args.command in UNLOGGED_COMMANDS:
+            return
+        arg_dict = {
+            k: v for k, v in vars(args).items() if k not in ("func", "command", "json", "backend")
+        }
+        result = {k: v for k, v in (payload or {}).items() if k not in ("ok", "command")}
+        redact_log_fields(arg_dict, result)
+        now = datetime.now()
+        entry = {
+            "ts": now.isoformat(timespec="milliseconds"),
+            "pid": os.getpid(),
+            "via": LOG_VIA,
+            "command": args.command,
+            "args": arg_dict,
+            "backend": getattr(args, "backend", None),
+            "ok": bool(payload["ok"]) if payload else code == 0,
+            "code": code,
+            "ms": int((time.monotonic() - started) * 1000),
+            "result": result,
+        }
+        folder = log_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        with open(folder / f"actions-{now:%Y%m%d}.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+    except Exception:
+        return
+    try:
+        prune_if_due()  # hourly; a bad AI_DESKTOP_KEEP_* value is reported by the command itself
+    except Exception:
+        pass
+
+
+def log_files() -> list[tuple[Path, os.stat_result]]:
+    """Daily log files, newest first."""
+    files = []
+    try:
+        with os.scandir(log_dir()) as entries:
+            for entry in entries:
+                if LOG_NAME_RE.match(entry.name) and entry.is_file(follow_symlinks=False):
+                    files.append((Path(entry.path), entry.stat(follow_symlinks=False)))
+    except FileNotFoundError:
+        return []
+    files.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    return files
+
+
+def prune_logs(keep_days: float | None, now: float | None = None) -> list[Path]:
+    """Delete daily log files older than `keep_days` (by mtime). `None` disables the rule."""
+    if keep_days is None:
+        return []
+    cutoff = (time.time() if now is None else now) - keep_days * 86400
+    removed = []
+    for path, st in log_files():
+        if st.st_mtime < cutoff:
+            try:
+                os.remove(path)
+            except OSError:
+                continue
+            removed.append(path)
+    return removed
+
+
+def read_log_entries(limit: int) -> list[dict]:
+    """The most recent `limit` entries, newest first; unreadable lines are skipped."""
+    entries: list[dict] = []
+    for path, _ in log_files():
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(entry, dict):
+                entries.append(entry)
+                if len(entries) >= limit:
+                    return entries
+    return entries
+
+
+def format_log_entry(entry: dict) -> str:
+    stamp = str(entry.get("ts", ""))[11:19]
+    result = entry.get("result") or {}
+    if entry.get("ok"):
+        outcome, detail = "ok", format_fields(result)
+    else:
+        outcome, detail = f"ERROR({entry.get('code', '?')})", str(result.get("error", ""))
+    via = entry.get("via", "cli")
+    return f"{stamp} {via} {entry.get('command')} {outcome} {entry.get('ms', '?')}ms {detail}".rstrip()
 
 
 # --- Backends ----------------------------------------------------------------------------
@@ -936,9 +1098,9 @@ def get_clipboard() -> str:
 def print_text(cmd: str, text: str, **fields) -> None:
     """Status line, then the text verbatim (as UTF-8, whatever the console encoding).
 
-    In JSON mode the text is the "text" field instead.
+    In JSON (or quiet) mode the text is the "text" field instead.
     """
-    if JSON_OUTPUT:
+    if JSON_OUTPUT or QUIET:
         status(cmd, chars=len(text), text=text, **fields)
         return
     status(cmd, chars=len(text), **fields)
@@ -1230,7 +1392,7 @@ def cmd_screenshots(args: argparse.Namespace) -> None:
             for path, st in files[: args.limit]
         ]
         status("screenshots", action="list", path=str(folder), count=len(rows), files=rows)
-        if not JSON_OUTPUT:
+        if text_mode():
             for row in rows:
                 print(row["path"])
     else:  # clean: ignores the hourly throttle and applies both rules now
@@ -1244,7 +1406,9 @@ def cmd_screenshots(args: argparse.Namespace) -> None:
             keep_mb = keep_setting("AI_DESKTOP_KEEP_MB", DEFAULT_KEEP_MB)
         sizes = {path: st.st_size for path, st in files}
         removed = prune_store(keep_days, keep_mb)
+        logs_removed = prune_logs(keep_days)
         try:
+            folder.mkdir(parents=True, exist_ok=True)
             (folder / PRUNE_MARKER).touch()
         except OSError:
             pass
@@ -1255,7 +1419,16 @@ def cmd_screenshots(args: argparse.Namespace) -> None:
             deleted=len(removed),
             kept=len(files) - len(removed),
             freed_mb=round(sum(sizes.get(path, 0) for path in removed) / 1048576, 1),
+            logs_deleted=len(logs_removed),
         )
+
+
+def cmd_log(args: argparse.Namespace) -> None:
+    entries = read_log_entries(args.limit)
+    status("log", path=str(log_dir()), count=len(entries), entries=entries)
+    if text_mode():
+        for entry in entries:
+            print(format_log_entry(entry))
 
 
 def cmd_grid(args: argparse.Namespace) -> None:
@@ -1405,7 +1578,7 @@ def cmd_launch_chrome(args: argparse.Namespace) -> None:
 def cmd_doctor(args: argparse.Namespace) -> None:
     checks = run_doctor(args.backend)
     counts = {state: sum(1 for c in checks if c.state == state) for state in ("ok", "warn", "fail")}
-    if not JSON_OUTPUT:
+    if text_mode():
         width = max(len(c.name) for c in checks)
         for c in checks:
             line = f"{c.state:<4} {c.name:<{width}}  {c.detail}"
@@ -1564,35 +1737,80 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("doctor", help="check that everything this platform needs is installed and permitted")
     p.set_defaults(func=cmd_doctor)
+
+    p = add("log", help="show recent entries from the action log, newest first")
+    p.add_argument("--limit", type=_positive_int, default=20, help="how many entries (default 20)")
+    p.set_defaults(func=cmd_log)
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    global JSON_OUTPUT, CURRENT_COMMAND
-    args = build_parser().parse_args(argv)
-    args.backend = getattr(args, "backend", None) or os.environ.get("AI_DESKTOP_BACKEND", "auto")
-    JSON_OUTPUT = bool(getattr(args, "json", False)) or os.environ.get(
-        "AI_DESKTOP_JSON", ""
-    ).strip().lower() in ("1", "true", "yes")
-    CURRENT_COMMAND = args.command
+def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, dict | None]:
+    """Run one invocation and return (exit code, result payload).
+
+    With quiet=True nothing is printed and bad arguments come back as a payload instead
+    of a SystemExit; the MCP server runs commands this way. The action log entry is
+    written here whatever the outcome.
+    """
+    global JSON_OUTPUT, QUIET, CURRENT_COMMAND, LAST_PAYLOAD
+    saved = (JSON_OUTPUT, QUIET, CURRENT_COMMAND)
+    started = time.monotonic()
+    args = None
+    code = 0
+    LAST_PAYLOAD = None
+    QUIET = quiet
     try:
-        args.func(args)
-    except CliError as exc:
-        return fail(str(exc), EXIT_ERROR, **exc.fields)
-    except OSError as exc:
-        return fail(str(exc), EXIT_ERROR)
-    except KeyboardInterrupt:
-        return fail("interrupted", 130)
-    except Exception as exc:
-        gui = sys.modules.get("pyautogui")
-        if gui is not None and isinstance(exc, getattr(gui, "FailSafeException", ())):
-            return fail(
-                "failsafe triggered: the mouse is in a screen corner, so the action was "
-                "aborted. Move it away from the corners to continue.",
-                EXIT_FAILSAFE,
-            )
-        raise
-    return 0
+        if quiet:
+            buffer = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    args = build_parser().parse_args(argv)
+            except SystemExit as exc:
+                code = exc.code if isinstance(exc.code, int) else 2
+                text = buffer.getvalue().strip()
+                if code == 0:  # --help / --version
+                    LAST_PAYLOAD = {"ok": True, "command": None, "text": text}
+                else:
+                    LAST_PAYLOAD = {"ok": False, "command": None, "error": f"bad arguments: {text}", "code": code}
+                return code, LAST_PAYLOAD
+        else:
+            args = build_parser().parse_args(argv)
+        args.backend = getattr(args, "backend", None) or os.environ.get("AI_DESKTOP_BACKEND", "auto")
+        JSON_OUTPUT = bool(getattr(args, "json", False)) or os.environ.get(
+            "AI_DESKTOP_JSON", ""
+        ).strip().lower() in ("1", "true", "yes")
+        CURRENT_COMMAND = args.command
+        try:
+            args.func(args)
+        except CliError as exc:
+            code = fail(str(exc), EXIT_ERROR, **exc.fields)
+        except OSError as exc:
+            code = fail(str(exc), EXIT_ERROR)
+        except KeyboardInterrupt:
+            code = fail("interrupted", 130)
+        except Exception as exc:
+            gui = sys.modules.get("pyautogui")
+            if gui is not None and isinstance(exc, getattr(gui, "FailSafeException", ())):
+                code = fail(
+                    "failsafe triggered: the mouse is in a screen corner, so the action was "
+                    "aborted. Move it away from the corners to continue.",
+                    EXIT_FAILSAFE,
+                )
+            else:
+                code = EXIT_ERROR
+                LAST_PAYLOAD = {
+                    "ok": False, "command": args.command,
+                    "error": f"{type(exc).__name__}: {exc}", "code": code,
+                }
+                raise
+        return code, LAST_PAYLOAD
+    finally:
+        if args is not None:
+            log_action(args, code, LAST_PAYLOAD, started)
+        JSON_OUTPUT, QUIET, CURRENT_COMMAND = saved
+
+
+def main(argv: list[str] | None = None) -> int:
+    return execute(argv)[0]
 
 
 if __name__ == "__main__":
