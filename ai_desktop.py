@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import ctypes
 import io
 import json
 import math
@@ -1018,34 +1019,160 @@ def _build_us_charmap() -> dict[str, tuple[int, bool]]:
 US_CHARMAP = _build_us_charmap()
 
 
-def x_root_size() -> tuple[int, int]:
-    """Size of the X root window via the system libX11.
+class _XWindowAttributes(ctypes.Structure):
+    _fields_ = [
+        ("x", ctypes.c_int), ("y", ctypes.c_int), ("width", ctypes.c_int), ("height", ctypes.c_int),
+        ("border_width", ctypes.c_int), ("depth", ctypes.c_int), ("visual", ctypes.c_void_p),
+        ("root", ctypes.c_ulong), ("class_", ctypes.c_int), ("bit_gravity", ctypes.c_int),
+        ("win_gravity", ctypes.c_int), ("backing_store", ctypes.c_int),
+        ("backing_planes", ctypes.c_ulong), ("backing_pixel", ctypes.c_ulong),
+        ("save_under", ctypes.c_int), ("colormap", ctypes.c_ulong), ("map_installed", ctypes.c_int),
+        ("map_state", ctypes.c_int), ("all_event_masks", ctypes.c_long),
+        ("your_event_mask", ctypes.c_long), ("do_not_propagate_mask", ctypes.c_long),
+        ("override_redirect", ctypes.c_int), ("screen", ctypes.c_void_p),
+    ]
 
-    Under Wayland this is Xwayland's root, which spans the desktop in logical pixels.
-    pyautogui isn't used here: its python3-xlib dependency can't read mutter's Xwayland
-    auth cookie.
+
+class _XClientMessageEvent(ctypes.Structure):
+    _fields_ = [
+        ("type", ctypes.c_int), ("serial", ctypes.c_ulong), ("send_event", ctypes.c_int),
+        ("display", ctypes.c_void_p), ("window", ctypes.c_ulong), ("message_type", ctypes.c_ulong),
+        ("format", ctypes.c_int), ("data", ctypes.c_long * 5),
+    ]
+
+
+class _XEvent(ctypes.Union):
+    _fields_ = [("type", ctypes.c_int), ("client", _XClientMessageEvent), ("pad", ctypes.c_long * 24)]
+
+
+class _X11:
+    """Minimal libX11 wrapper for root-window properties and EWMH requests.
+
+    pyautogui's python3-xlib can't read mutter's Xwayland auth cookie from some
+    terminals; the system libX11 can, so screen size and window management go through it.
     """
-    import ctypes
 
-    hint = "set AI_DESKTOP_SCREEN_SIZE=WIDTHxHEIGHT"
-    try:
-        x11 = ctypes.CDLL("libX11.so.6")
-    except OSError as exc:
-        raise CliError(f"cannot load libX11 to read the screen size; {hint}") from exc
-    x11.XOpenDisplay.restype = ctypes.c_void_p
-    x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
-    x11.XDefaultScreen.argtypes = [ctypes.c_void_p]
-    x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
-    x11.XDisplayWidth.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    x11.XDisplayHeight.argtypes = [ctypes.c_void_p, ctypes.c_int]
-    display = x11.XOpenDisplay(None)
-    if not display:
-        raise CliError(f"cannot open X display {os.environ.get('DISPLAY', '(unset)')!r}; {hint}")
-    try:
-        screen = x11.XDefaultScreen(display)
-        return x11.XDisplayWidth(display, screen), x11.XDisplayHeight(display, screen)
-    finally:
-        x11.XCloseDisplay(display)
+    SUBSTRUCTURE_MASK = (1 << 19) | (1 << 20)  # SubstructureNotify | SubstructureRedirect
+
+    def __init__(self) -> None:
+        hint = "set AI_DESKTOP_SCREEN_SIZE=WIDTHxHEIGHT"
+        try:
+            lib = ctypes.CDLL("libX11.so.6")
+        except OSError as exc:
+            raise CliError(f"cannot load libX11 to talk to the X server; {hint}") from exc
+        c = ctypes
+        vp, ci, cl, ul = c.c_void_p, c.c_int, c.c_long, c.c_ulong
+        lib.XOpenDisplay.restype = vp
+        lib.XOpenDisplay.argtypes = [c.c_char_p]
+        lib.XCloseDisplay.argtypes = [vp]
+        lib.XDefaultScreen.argtypes = [vp]
+        lib.XDefaultRootWindow.restype = ul
+        lib.XDefaultRootWindow.argtypes = [vp]
+        lib.XDisplayWidth.argtypes = [vp, ci]
+        lib.XDisplayHeight.argtypes = [vp, ci]
+        lib.XInternAtom.restype = ul
+        lib.XInternAtom.argtypes = [vp, c.c_char_p, ci]
+        lib.XGetWindowProperty.argtypes = [
+            vp, ul, ul, cl, cl, ci, ul, c.POINTER(ul), c.POINTER(ci), c.POINTER(ul), c.POINTER(ul),
+            c.POINTER(c.POINTER(c.c_ubyte)),
+        ]
+        lib.XFree.argtypes = [vp]
+        lib.XGetWindowAttributes.argtypes = [vp, ul, c.POINTER(_XWindowAttributes)]
+        lib.XTranslateCoordinates.argtypes = [
+            vp, ul, ul, ci, ci, c.POINTER(ci), c.POINTER(ci), c.POINTER(ul),
+        ]
+        lib.XSendEvent.argtypes = [vp, ul, ci, cl, c.POINTER(_XEvent)]
+        lib.XFlush.argtypes = [vp]
+        # Xlib's default error handler exits the process on a BadWindow (a window that
+        # closed between listing and querying); make such errors non-fatal.
+        self._error_handler = c.CFUNCTYPE(ci, vp, vp)(lambda display, event: 0)
+        lib.XSetErrorHandler(self._error_handler)
+        self.lib = lib
+        self.display = lib.XOpenDisplay(None)
+        if not self.display:
+            raise CliError(f"cannot open X display {os.environ.get('DISPLAY', '(unset)')!r}; {hint}")
+        self.root = lib.XDefaultRootWindow(self.display)
+
+    def __enter__(self) -> _X11:
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.lib.XCloseDisplay(self.display)
+
+    def root_size(self) -> tuple[int, int]:
+        screen = self.lib.XDefaultScreen(self.display)
+        return self.lib.XDisplayWidth(self.display, screen), self.lib.XDisplayHeight(self.display, screen)
+
+    def atom(self, name: str) -> int:
+        return self.lib.XInternAtom(self.display, name.encode(), 0)
+
+    def get_property(self, window: int, name: str) -> tuple[int, bytes]:
+        """(format, raw bytes) of a window property, or (0, b"") when it is absent."""
+        c = ctypes
+        actual_type, actual_format = c.c_ulong(), c.c_int()
+        nitems, bytes_after = c.c_ulong(), c.c_ulong()
+        prop = c.POINTER(c.c_ubyte)()
+        ok = self.lib.XGetWindowProperty(
+            self.display, window, self.atom(name), 0, 1 << 20, 0, 0,
+            c.byref(actual_type), c.byref(actual_format), c.byref(nitems), c.byref(bytes_after),
+            c.byref(prop),
+        )
+        if ok != 0 or not prop or actual_format.value == 0:
+            return 0, b""
+        fmt = actual_format.value
+        item_size = c.sizeof(c.c_long) if fmt == 32 else fmt // 8  # 32-bit items arrive as C longs
+        data = c.string_at(prop, nitems.value * item_size)
+        self.lib.XFree(prop)
+        return fmt, data
+
+    def get_longs(self, window: int, name: str) -> list[int]:
+        fmt, data = self.get_property(window, name)
+        if fmt != 32:
+            return []
+        count = len(data) // ctypes.sizeof(ctypes.c_long)
+        return list(struct.unpack(f"@{count}L", data))
+
+    def get_text(self, window: int, name: str) -> str:
+        fmt, data = self.get_property(window, name)
+        return data.decode("utf-8", "replace").rstrip("\0") if fmt == 8 else ""
+
+    def get_strings(self, window: int, name: str) -> list[str]:
+        fmt, data = self.get_property(window, name)
+        return [s.decode("utf-8", "replace") for s in data.split(b"\0") if s] if fmt == 8 else []
+
+    def geometry(self, window: int) -> tuple[int, int, int, int, bool]:
+        """(x, y, width, height, viewable) of a window in root coordinates."""
+        c = ctypes
+        attrs = _XWindowAttributes()
+        if not self.lib.XGetWindowAttributes(self.display, window, c.byref(attrs)):
+            raise CliError(f"window {window:#x} vanished")
+        x, y, child = c.c_int(), c.c_int(), c.c_ulong()
+        self.lib.XTranslateCoordinates(
+            self.display, window, self.root, 0, 0, c.byref(x), c.byref(y), c.byref(child)
+        )
+        return x.value, y.value, attrs.width, attrs.height, attrs.map_state == 2  # IsViewable
+
+    def send_client_message(self, window: int, name: str, data: list[int]) -> None:
+        """An EWMH request about `window`, delivered to the window manager via the root."""
+        event = _XEvent()
+        msg = event.client
+        msg.type = 33  # ClientMessage
+        msg.send_event = 1
+        msg.display = self.display
+        msg.window = window
+        msg.message_type = self.atom(name)
+        msg.format = 32
+        for i, value in enumerate(data[:5]):
+            msg.data[i] = value
+        self.lib.XSendEvent(self.display, self.root, 0, self.SUBSTRUCTURE_MASK, ctypes.byref(event))
+        self.lib.XFlush(self.display)
+
+
+def x_root_size() -> tuple[int, int]:
+    """Size of the X root window. Under Wayland this is Xwayland's root, which spans the
+    desktop in logical pixels."""
+    with _X11() as x:
+        return x.root_size()
 
 
 class _UInputDevice:
@@ -1271,6 +1398,24 @@ def find_chrome_executable() -> str:
     raise CliError("Google Chrome not found in the usual locations or on PATH")
 
 
+CHROME_DESKTOP_IDS = (
+    "google-chrome", "com.google.Chrome", "chromium", "chromium-browser", "org.chromium.Chromium",
+)
+
+
+def find_desktop_entry(ids: tuple[str, ...]) -> tuple[str, str] | None:
+    """(id, path) of the first installed .desktop entry among `ids`, or None."""
+    data_dirs = host_env().get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share"
+    folders = [Path.home() / ".local/share/applications"]
+    folders += [Path(d) / "applications" for d in data_dirs.split(":") if d]
+    for app_id in ids:
+        for folder in folders:
+            path = folder / f"{app_id}.desktop"
+            if path.is_file():
+                return app_id, str(path)
+    return None
+
+
 def spawn_detached(argv: list[str]) -> None:
     kwargs = {
         "stdin": subprocess.DEVNULL,
@@ -1296,6 +1441,245 @@ def launch_chrome_macos(url: str | None, profile: str | None) -> None:
     if result.returncode != 0:
         raise CliError(f"could not open Google Chrome: {result.stderr.strip()}")
     status("launch-chrome", app=app, profile=profile or "last-used", url=url or "none")
+
+
+# --- Windows (the on-screen kind) --------------------------------------------------------
+
+
+class Win(NamedTuple):
+    id: str  # hex X window id / hWnd, or the CGWindow number on macOS
+    pid: int
+    app: str  # WM_CLASS, owner app name, or exe basename
+    title: str
+    x: int  # global logical coordinates, the same space `click` uses
+    y: int
+    width: int
+    height: int
+    active: bool
+    minimized: bool
+
+
+WAYLAND_WINDOWS_NOTE = (
+    "X11/XWayland windows only: native Wayland windows cannot be listed or focused (GNOME "
+    "has no public API for them); log in to the 'Ubuntu on Xorg' session for full window control"
+)
+
+
+def _windows_x11() -> list[Win]:
+    with _X11() as x:
+        stacking = x.get_longs(x.root, "_NET_CLIENT_LIST_STACKING") or x.get_longs(x.root, "_NET_CLIENT_LIST")
+        active = (x.get_longs(x.root, "_NET_ACTIVE_WINDOW") or [0])[0]
+        hidden, skip = x.atom("_NET_WM_STATE_HIDDEN"), x.atom("_NET_WM_STATE_SKIP_TASKBAR")
+        found = []
+        for window in reversed(stacking):  # EWMH lists bottom-to-top; we want the front first
+            try:
+                title = x.get_text(window, "_NET_WM_NAME") or x.get_text(window, "WM_NAME")
+                if not title:
+                    continue
+                state = x.get_longs(window, "_NET_WM_STATE")
+                if skip in state:
+                    continue
+                classes = x.get_strings(window, "WM_CLASS")
+                app = classes[1] if len(classes) > 1 else (classes[0] if classes else "")
+                pid = (x.get_longs(window, "_NET_WM_PID") or [0])[0]
+                gx, gy, width, height, viewable = x.geometry(window)
+                extents = x.get_longs(window, "_NET_FRAME_EXTENTS")  # left, right, top, bottom
+                if len(extents) == 4:
+                    gx, gy = gx - extents[0], gy - extents[2]
+                    width += extents[0] + extents[1]
+                    height += extents[2] + extents[3]
+            except CliError:
+                continue  # closed while we were looking
+            found.append(
+                Win(f"{window:#x}", pid, app, title, gx, gy, width, height, window == active,
+                    hidden in state or not viewable)
+            )
+        return found
+
+
+def _activate_x11(win: Win) -> dict:
+    window = int(win.id, 16)
+    with _X11() as x:
+        # Source indication 2 = a request from a pager/agent, which window managers honour.
+        x.send_client_message(window, "_NET_ACTIVE_WINDOW", [2, 0, 0, 0, 0])
+        time.sleep(0.2)
+        active = (x.get_longs(x.root, "_NET_ACTIVE_WINDOW") or [0])[0]
+    return {"activated": active == window}
+
+
+def _win32_process_name(pid: int) -> str:
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ""
+    try:
+        buf = ctypes.create_unicode_buffer(1024)
+        size = ctypes.c_ulong(len(buf))
+        if not kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+            return ""
+        name = os.path.basename(buf.value)
+        return name[:-4] if name.lower().endswith(".exe") else name
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _windows_win32() -> list[Win]:
+    from ctypes import wintypes
+
+    import pygetwindow
+
+    user32, dwmapi = ctypes.windll.user32, ctypes.windll.dwmapi
+    dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    foreground = user32.GetForegroundWindow()
+    found = []
+    for win in pygetwindow.getAllWindows():  # Z-order, front first
+        hwnd = int(win._hWnd)
+        title = win.title
+        if not title or user32.GetWindowLongW(hwnd, -20) & 0x80:  # untitled or WS_EX_TOOLWINDOW
+            continue
+        cloaked = wintypes.DWORD(0)
+        if dwmapi.DwmGetWindowAttribute(hwnd, 14, ctypes.byref(cloaked), ctypes.sizeof(cloaked)) == 0 and cloaked.value:
+            continue  # UWP shells and windows on other virtual desktops
+        rect = wintypes.RECT()
+        if dwmapi.DwmGetWindowAttribute(hwnd, 9, ctypes.byref(rect), ctypes.sizeof(rect)) != 0:
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))  # DWM bounds exclude invisible borders
+        pid = wintypes.DWORD(0)
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        found.append(
+            Win(f"{hwnd:#x}", pid.value, _win32_process_name(pid.value), title, rect.left, rect.top,
+                rect.right - rect.left, rect.bottom - rect.top, hwnd == foreground, bool(win.isMinimized))
+        )
+    return found
+
+
+def _activate_win32(win: Win) -> dict:
+    user32 = ctypes.windll.user32
+    hwnd = int(win.id, 16)
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+    user32.SetForegroundWindow(hwnd)
+    if user32.GetForegroundWindow() != hwnd:
+        # Windows won't hand the foreground to a process that got no input lately; a
+        # synthetic ALT tap counts as input and lifts that lock.
+        user32.keybd_event(0x12, 0, 0, 0)
+        user32.keybd_event(0x12, 0, 2, 0)
+        user32.SetForegroundWindow(hwnd)
+    time.sleep(0.1)
+    return {"activated": user32.GetForegroundWindow() == hwnd}
+
+
+def _windows_macos() -> list[Win]:
+    import Quartz
+
+    options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+    infos = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []
+    front_pid = None
+    try:
+        import AppKit
+
+        app = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+        front_pid = int(app.processIdentifier()) if app is not None else None
+    except Exception:
+        pass
+    found = []
+    seen_active = False
+    for info in infos:  # already front-to-back
+        if info.get("kCGWindowLayer", 0) != 0 or info.get("kCGWindowAlpha", 1) <= 0:
+            continue
+        bounds = info.get("kCGWindowBounds") or {}
+        width, height = int(bounds.get("Width", 0)), int(bounds.get("Height", 0))
+        if width < 50 or height < 50:
+            continue
+        owner = str(info.get("kCGWindowOwnerName") or "")
+        title = str(info.get("kCGWindowName") or "")  # empty for other apps without Screen Recording
+        if not title and not owner:
+            continue
+        pid = int(info.get("kCGWindowOwnerPID", 0))
+        active = pid == front_pid and not seen_active
+        seen_active = seen_active or active
+        found.append(
+            Win(str(info.get("kCGWindowNumber", "")), pid, owner, title, int(bounds.get("X", 0)),
+                int(bounds.get("Y", 0)), width, height, active, False)
+        )
+    return found
+
+
+def _activate_macos(win: Win) -> dict:
+    import AppKit
+
+    app = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(win.pid)
+    if app is None:
+        raise CliError(f"no running app with pid {win.pid}")
+    result = {"activated": bool(app.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps))}
+    if win.title:
+        # Raise that one window too (best effort; System Events asks for Automation consent once).
+        script = (
+            'tell application "System Events" to tell (first process whose unix id is %d) '
+            'to perform action "AXRaise" of (first window whose name is %s)'
+            % (win.pid, json.dumps(win.title, ensure_ascii=False))
+        )
+        try:
+            done = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=10)
+            result["raised"] = done.returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            result["raised"] = False
+    return result
+
+
+def list_windows() -> tuple[list[Win], bool]:
+    """Windows front-to-back, and whether the list is partial (Wayland: X11 windows only)."""
+    if sys.platform == "win32":
+        return _windows_win32(), False
+    if sys.platform == "darwin":
+        return _windows_macos(), False
+    return _windows_x11(), is_wayland()
+
+
+def select_window(
+    windows: list[Win],
+    title: str | None = None,
+    app: str | None = None,
+    pid: int | None = None,
+    id: str | None = None,
+) -> tuple[Win, int]:
+    """Pick one window: substring matches for title (or app name) and app, exact for pid/id.
+
+    An exact title match wins; otherwise the front-most match. Returns (window, matches).
+    """
+
+    def matches(w: Win) -> bool:
+        if id is not None and w.id.lower() != str(id).lower():
+            return False
+        if pid is not None and w.pid != pid:
+            return False
+        if app is not None and app.lower() not in w.app.lower():
+            return False
+        if title is not None:
+            needle = title.lower()
+            if needle not in w.title.lower() and needle not in w.app.lower():
+                return False
+        return True
+
+    found = [w for w in windows if matches(w)]
+    if not found:
+        wanted = ", ".join(
+            f"{k}={v!r}" for k, v in (("title", title), ("app", app), ("pid", pid), ("id", id))
+            if v is not None
+        )
+        raise CliError(f"no window matches {wanted}; run: ai-desktop windows")
+    if title is not None:
+        exact = [w for w in found if w.title.lower() == title.lower()]
+        if exact:
+            return exact[0], len(found)
+    return found[0], len(found)
+
+
+def activate_window(win: Win) -> dict:
+    if sys.platform == "win32":
+        return _activate_win32(win)
+    if sys.platform == "darwin":
+        return _activate_macos(win)
+    return _activate_x11(win)
 
 
 # --- Clipboard ---------------------------------------------------------------------------
@@ -1546,6 +1930,20 @@ def _check_chrome():
     return "ok", find_chrome_executable()
 
 
+def _check_windows():
+    windows, partial = list_windows()
+    how = {"win32": "Win32", "darwin": "Quartz"}.get(sys.platform, "libX11 EWMH")
+    if partial:
+        return "warn", f"{how}: {len(windows)} X11/XWayland window(s)", WAYLAND_WINDOWS_NOTE
+    hint = ""
+    if sys.platform == "darwin":
+        hint = (
+            "other apps' titles need Screen Recording; focus needs Accessibility and a "
+            "one-time Automation consent for System Events"
+        )
+    return "ok", f"{how}: {len(windows)} window(s)", hint
+
+
 def _check_store():
     folder = store_dir()
     folder.mkdir(parents=True, exist_ok=True)
@@ -1627,6 +2025,7 @@ def run_doctor(backend_name: str) -> list[Check]:
             )
 
         checks.append(run_check("screenshot", _capture))
+    checks.append(run_check("windows", _check_windows, soft=True))
     checks.append(run_check("clipboard", _check_clipboard))
     checks.append(run_check("chrome", _check_chrome, soft=True))
     checks.append(run_check("store", _check_store))
@@ -1891,6 +2290,17 @@ def cmd_launch_chrome(args: argparse.Namespace) -> None:
         argv.append(f"--profile-directory={args.profile}")
     if args.url:
         argv.append(args.url)
+    launcher = "exec"
+    if sys.platform.startswith("linux") and not args.profile:
+        # Going through the desktop entry gives the launch an activation token, so the
+        # window manager may bring the new window to the front instead of opening it
+        # behind the terminal. Desktop entries can't carry --profile-directory.
+        entry = find_desktop_entry(CHROME_DESKTOP_IDS)
+        url = [args.url] if args.url else []
+        if entry and shutil.which("gtk-launch"):
+            argv, launcher = ["gtk-launch", entry[0], *url], "gtk-launch"
+        elif entry and shutil.which("gio"):
+            argv, launcher = ["gio", "launch", entry[1], *url], "gio"
     spawn_detached(argv)
     status(
         "launch-chrome",
@@ -1898,7 +2308,33 @@ def cmd_launch_chrome(args: argparse.Namespace) -> None:
         user_data_dir=user_data or "default",
         profile=args.profile or "last-used",
         url=args.url or "none",
+        launcher=launcher,
     )
+
+
+def cmd_windows(args: argparse.Namespace) -> None:
+    windows, partial = list_windows()
+    fields: dict = dict(count=len(windows), partial=partial, windows=[w._asdict() for w in windows])
+    if partial:
+        fields["note"] = WAYLAND_WINDOWS_NOTE
+    status("windows", **fields)
+    if text_mode():
+        for w in windows:
+            flags = (" active" if w.active else "") + (" minimized" if w.minimized else "")
+            title = json.dumps(w.title, ensure_ascii=False)
+            print(f"{w.id} pid={w.pid} {w.x},{w.y} {w.width}x{w.height}{flags} {w.app or '-'} {title}")
+
+
+def cmd_focus(args: argparse.Namespace) -> None:
+    if args.title is None and args.app is None and args.pid is None and args.id is None:
+        raise CliError("give --title, --app, --pid or --id (see: ai-desktop windows)")
+    windows, _ = list_windows()
+    win, matches = select_window(windows, title=args.title, app=args.app, pid=args.pid, id=args.id)
+    result = activate_window(win)
+    fields = dict(id=win.id, pid=win.pid, app=win.app, title=win.title, matches=matches, **result)
+    if not result.get("activated"):
+        raise CliError(f"window {win.id} ({win.title!r}) did not come to the front", **fields)
+    status("focus", **fields)
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -1998,6 +2434,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("monitors", help="list monitors with their global coordinates")
     p.set_defaults(func=cmd_monitors)
+
+    p = add("windows", help="list open windows, front to back, with their global coordinates")
+    p.set_defaults(func=cmd_windows)
+
+    p = add("focus", help="bring a window to the front")
+    p.add_argument("--title", help="case-insensitive part of the window title (or app name)")
+    p.add_argument("--app", help="case-insensitive part of the app name (WM_CLASS / owner / exe)")
+    p.add_argument("--pid", type=int, help="process id")
+    p.add_argument("--id", help="window id as printed by 'windows'")
+    p.set_defaults(func=cmd_focus)
 
     p = add("grid", help="draw a coordinate grid on an existing image")
     p.add_argument("--input", required=True, help="image to annotate")
