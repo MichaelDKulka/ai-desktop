@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-desktop"
+version = "0.1.0"
+description = "CLI that lets an AI agent see the screen with a coordinate grid and control the mouse and keyboard"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = ["pyautogui>=0.9.54", "pillow>=10.1"]
+
+[project.scripts]
+ai-desktop = "ai_desktop:main"
+
+[tool.setuptools]
+py-modules = ["ai_desktop"]
