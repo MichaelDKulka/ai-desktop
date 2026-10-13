@@ -1,5 +1,7 @@
 # AI Desktop Controller
 
+![ai-desktop typing into a window and dragging it around, every action from the CLI](docs/demo.gif)
+
 [![CI](https://github.com/MichaelDKulka/ai-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/MichaelDKulka/ai-desktop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -43,6 +45,7 @@ ai-desktop screenshot [--grid] [--spacing 100] [--monitor all|primary|N] [-o scr
 ai-desktop grid --input image.png [-o gridded.png] [--spacing 100]
 ai-desktop click --x 500 --y 300 [--button left|right|middle] [--double]
 ai-desktop move --x 500 --y 300
+ai-desktop drag --x1 200 --y1 150 --x2 900 --y2 400 [--duration 0.5] [--button left|right|middle]
 ai-desktop type --text "hello world" [--interval 0.02]
 ai-desktop key --key enter
 ai-desktop hotkey --keys ctrl+c
@@ -120,6 +123,19 @@ ai-desktop monitors
 - `click`, `move` and `scroll` accept any point on any monitor. `position` reports `monitor=` for the pointer.
 - The layout comes from `xrandr` (Linux, also under Xwayland), `EnumDisplayMonitors` (Windows) or Quartz (macOS). If it can't be read, the tool assumes one screen and `doctor` warns.
 - Known limit: Windows with *different* scaling per monitor isn't handled; keep the same scaling everywhere (100% recommended).
+
+### Monitor-relative coordinates
+
+`click`, `move`, `drag` and `scroll` take global coordinates by default. Add `--monitor N`
+(an index from `monitors`, or `primary`) and x/y are relative to that monitor's top-left,
+which matches the pixels of `screenshot --monitor N` without grid labels:
+
+```bash
+ai-desktop click --monitor 1 --x 100 --y 50        # 100,50 inside monitor 1
+ai-desktop drag  --monitor 1 --x1 560 --y1 155 --x2 1100 --y2 420
+```
+
+A point outside that monitor is rejected. The MCP tools take the same optional `monitor`.
 
 ## Windows and focus
 

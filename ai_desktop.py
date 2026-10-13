@@ -33,7 +33,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_SPACING = 100
 MIN_SPACING = 10
@@ -523,6 +523,29 @@ def resolve_monitor(spec: str, monitors: list[Monitor]) -> Monitor | None:
     raise CliError(f"no monitor {index}; run: ai-desktop monitors")
 
 
+def to_global(backend: "Backend", monitor: str | None, x: int, y: int) -> tuple[int, int]:
+    """Map (x, y) relative to `monitor`'s top-left to global coordinates.
+
+    With no monitor the point is already global and is returned unchanged.
+    """
+    if monitor is None:
+        return x, y
+    target = resolve_monitor(monitor, list_monitors(backend))
+    if target is None:
+        raise CliError("--monitor all has no origin; give primary or an index")
+    if not (0 <= x < target.width and 0 <= y < target.height):
+        raise CliError(
+            f"({x}, {y}) is outside monitor {target.index} ({target.width}x{target.height}); "
+            "with --monitor, x and y are relative to that monitor's top-left"
+        )
+    return target.x + x, target.y + y
+
+
+def _monitor_fields(args: argparse.Namespace) -> dict:
+    monitor = getattr(args, "monitor", None)
+    return {} if monitor is None else {"monitor": monitor}
+
+
 class Capture(NamedTuple):
     image: Image.Image
     x: int  # global coordinates of the image's top-left pixel
@@ -935,6 +958,14 @@ class PyAutoGuiBackend(Backend):
     def click(self, x: int, y: int, button: str, clicks: int) -> None:
         self.gui.click(x=x, y=y, button=button, clicks=clicks, interval=0.1)
 
+    def drag(self, x1: int, y1: int, x2: int, y2: int, button: str, duration: float) -> None:
+        self.gui.moveTo(x1, y1)
+        self.gui.mouseDown(button=button)
+        try:
+            self.gui.moveTo(x2, y2, duration=duration)
+        finally:
+            self.gui.mouseUp(button=button)
+
     def type_text(self, text: str, interval: float) -> None:
         self.gui.write(text, interval=interval)
 
@@ -1306,6 +1337,20 @@ class UInputBackend(Backend):
                     time.sleep(0.08)
                 dev.emit(EV_KEY, code, 1)
                 time.sleep(0.02)
+                dev.emit(EV_KEY, code, 0)
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, button: str, duration: float) -> None:
+        code = MOUSE_BUTTONS[button]
+        steps = max(2, int(duration / 0.02))
+        with self._pointer() as dev:
+            self._move_to(dev, x1, y1)
+            dev.emit(EV_KEY, code, 1)
+            try:
+                for i in range(1, steps + 1):
+                    dev.emit(EV_ABS, ABS_X, round(x1 + (x2 - x1) * i / steps))
+                    dev.emit(EV_ABS, ABS_Y, round(y1 + (y2 - y1) * i / steps))
+                    time.sleep(duration / steps)
+            finally:
                 dev.emit(EV_KEY, code, 0)
 
     def type_text(self, text: str, interval: float) -> None:
@@ -2168,17 +2213,32 @@ def cmd_grid(args: argparse.Namespace) -> None:
 
 def cmd_click(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
-    backend.check_point(args.x, args.y)
+    x, y = to_global(backend, args.monitor, args.x, args.y)
+    backend.check_point(x, y)
     clicks = 2 if args.double else 1
-    backend.click(args.x, args.y, args.button, clicks)
-    status("click", x=args.x, y=args.y, button=args.button, clicks=clicks)
+    backend.click(x, y, args.button, clicks)
+    status("click", x=x, y=y, button=args.button, clicks=clicks, **_monitor_fields(args))
 
 
 def cmd_move(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
-    backend.check_point(args.x, args.y)
-    backend.move(args.x, args.y)
-    status("move", x=args.x, y=args.y)
+    x, y = to_global(backend, args.monitor, args.x, args.y)
+    backend.check_point(x, y)
+    backend.move(x, y)
+    status("move", x=x, y=y, **_monitor_fields(args))
+
+
+def cmd_drag(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    x1, y1 = to_global(backend, args.monitor, args.x1, args.y1)
+    x2, y2 = to_global(backend, args.monitor, args.x2, args.y2)
+    backend.check_point(x1, y1)
+    backend.check_point(x2, y2)
+    backend.drag(x1, y1, x2, y2, args.button, args.duration)
+    status(
+        "drag", x1=x1, y1=y1, x2=x2, y2=y2, button=args.button, duration=args.duration,
+        **_monitor_fields(args),
+    )
 
 
 def cmd_type(args: argparse.Namespace) -> None:
@@ -2208,17 +2268,22 @@ def cmd_hotkey(args: argparse.Namespace) -> None:
 def cmd_scroll(args: argparse.Namespace) -> None:
     if (args.x is None) != (args.y is None):
         raise CliError("give both --x and --y, or neither")
+    if args.monitor is not None and args.x is None:
+        raise CliError("--monitor needs --x and --y")
     backend = get_backend(args.backend)
-    if args.x is not None:
-        backend.check_point(args.x, args.y)
+    x, y = args.x, args.y
+    if x is not None:
+        x, y = to_global(backend, args.monitor, x, y)
+        backend.check_point(x, y)
     notches = args.amount if args.direction == "up" else -args.amount
-    backend.scroll(notches, args.x, args.y)
+    backend.scroll(notches, x, y)
     status(
         "scroll",
         direction=args.direction,
         amount=args.amount,
-        x=args.x if args.x is not None else "current",
-        y=args.y if args.y is not None else "current",
+        x=x if x is not None else "current",
+        y=y if y is not None else "current",
+        **_monitor_fields(args),
     )
 
 
@@ -2466,12 +2531,38 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--y", type=int, required=True)
     p.add_argument("--button", choices=tuple(MOUSE_BUTTONS), default="left")
     p.add_argument("--double", action="store_true", help="double-click")
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_click)
 
     p = add("move", help="move the mouse to a screen coordinate")
     p.add_argument("--x", type=int, required=True)
     p.add_argument("--y", type=int, required=True)
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_move)
+
+    p = add("drag", help="press a mouse button at one point, move to another, release")
+    p.add_argument("--x1", type=int, required=True, help="start x")
+    p.add_argument("--y1", type=int, required=True, help="start y")
+    p.add_argument("--x2", type=int, required=True, help="end x")
+    p.add_argument("--y2", type=int, required=True, help="end y")
+    p.add_argument("--button", choices=tuple(MOUSE_BUTTONS), default="left")
+    p.add_argument(
+        "--duration", type=_non_negative_float, default=0.5, help="seconds the move takes (default 0.5)"
+    )
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
+    p.set_defaults(func=cmd_drag)
 
     p = add("type", help="type text (printable ASCII, newline, tab)")
     p.add_argument("--text", required=True)
@@ -2491,6 +2582,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--amount", type=_positive_int, default=3, help="wheel notches (default 3)")
     p.add_argument("--x", type=int, help="move here before scrolling")
     p.add_argument("--y", type=int, help="move here before scrolling")
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_scroll)
 
     p = add("copy", help="press the copy shortcut and print what was copied")

@@ -65,7 +65,7 @@ def fake_gui(monkeypatch):
         "enter", "tab", "esc", "space", "ctrl", "shift", "alt", "win", "command", "pagedown",
     }
     fake.screenshot = lambda: Image.new("RGB", (1920, 1080), (1, 2, 3))
-    for name in ("moveTo", "click", "write", "press", "hotkey", "scroll"):
+    for name in ("moveTo", "mouseDown", "mouseUp", "click", "write", "press", "hotkey", "scroll"):
         setattr(fake, name, _recorder(fake.calls, name))
     monkeypatch.setitem(sys.modules, "pyautogui", fake)
     return fake
