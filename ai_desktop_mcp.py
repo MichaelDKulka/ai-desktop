@@ -129,15 +129,29 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
         return [dumps(payload), Image(data=png, format="png")]
 
     @tool(ACTION)
-    def click(x: int, y: int, button: str = "left", double: bool = False) -> str:
-        """Click at a screen coordinate (button: left, right or middle)."""
-        argv = ["click", "--x", str(x), "--y", str(y), "--button", button]
+    def click(
+        x: int, y: int, button: str = "left", double: bool = False, monitor: str | None = None
+    ) -> str:
+        """Click at a screen coordinate (button: left, right or middle). With monitor="N",
+        x and y are relative to that monitor's top-left instead of global."""
+        argv = ["click", "--x", str(x), "--y", str(y), "--button", button] + _opt("--monitor", monitor)
         return dumps(run(argv + (["--double"] if double else [])))
 
     @tool(ACTION)
-    def move(x: int, y: int) -> str:
-        """Move the mouse to a screen coordinate without clicking."""
-        return dumps(run(["move", "--x", str(x), "--y", str(y)]))
+    def move(x: int, y: int, monitor: str | None = None) -> str:
+        """Move the mouse to a screen coordinate without clicking (monitor-relative with monitor="N")."""
+        return dumps(run(["move", "--x", str(x), "--y", str(y)] + _opt("--monitor", monitor)))
+
+    @tool(ACTION)
+    def drag(
+        x1: int, y1: int, x2: int, y2: int, button: str = "left", duration: float = 0.5,
+        monitor: str | None = None,
+    ) -> str:
+        """Press `button` at (x1, y1), move to (x2, y2) over `duration` seconds, release.
+        Moves windows, sliders, selections. monitor="N" makes all points monitor-relative."""
+        argv = ["drag", "--x1", str(x1), "--y1", str(y1), "--x2", str(x2), "--y2", str(y2)]
+        argv += ["--button", button, "--duration", str(duration)] + _opt("--monitor", monitor)
+        return dumps(run(argv))
 
     @tool(ACTION, name="type")
     def type_text(text: str, interval: float = 0.02) -> str:
@@ -156,10 +170,14 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
         return dumps(run(["hotkey", "--keys", keys]))
 
     @tool(ACTION)
-    def scroll(direction: str = "down", amount: int = 3, x: int | None = None, y: int | None = None) -> str:
-        """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y)."""
+    def scroll(
+        direction: str = "down", amount: int = 3, x: int | None = None, y: int | None = None,
+        monitor: str | None = None,
+    ) -> str:
+        """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y)
+        (monitor-relative with monitor="N")."""
         argv = ["scroll", "--direction", direction, "--amount", str(amount)]
-        return dumps(run(argv + _opt("--x", x) + _opt("--y", y)))
+        return dumps(run(argv + _opt("--x", x) + _opt("--y", y) + _opt("--monitor", monitor)))
 
     @tool(ACTION)
     def copy() -> str:

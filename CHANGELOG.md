@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (unreleased)
+
+- **`drag`.** `drag --x1 --y1 --x2 --y2 [--duration 0.5] [--button left|right|middle]`
+  presses at the start point, moves to the end over `--duration` seconds and releases
+  (the button is released even if the move fails). Both points are bounds/failsafe
+  checked before anything moves. Works on pyautogui and the Wayland uinput backend, is
+  logged like every command, and is an MCP tool.
+- **Monitor-relative coordinates.** `click`, `move`, `drag` and `scroll` accept
+  `--monitor N|primary`; x/y are then relative to that monitor's top-left and must lie
+  inside it. Global coordinates stay the default. The MCP `click`, `move`, `drag` and
+  `scroll` tools take an optional `monitor`.
+- **Demo.** `docs/demo.gif` in the README, recorded by `docs/record_demo.py`.
+
 ## 0.3.0 (unreleased)
 
 - **Window management.** `windows` lists open windows front-to-back with their global
