@@ -8,15 +8,14 @@ that is the MCP transport.
 from __future__ import annotations
 
 import contextlib
-import io
 import json
 import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
-from PIL import Image as PILImage
 
 try:  # an expected tool failure whose message is passed to the client as-is
     from mcp.server.mcpserver.exceptions import ToolError
@@ -25,7 +24,6 @@ except ImportError:  # pragma: no cover - older SDK layout
 
 import ai_desktop
 
-DEFAULT_MAX_WIDTH = 1920
 
 # Desktop actions must not interleave, and the CLI's module globals aren't thread-safe.
 _LOCK = threading.Lock()
@@ -37,9 +35,16 @@ ACTION = ToolAnnotations(
 
 INSTRUCTIONS = """\
 ai-desktop controls this computer's real desktop and its signed-in accounts.
-Work in a loop: screenshot -> read the labelled grid -> ONE action -> screenshot again.
-Grid labels are screen coordinates: pass them to click/move unchanged. On a multi-monitor
-desktop use monitor="N" for a closer look at one screen.
+Work in a loop: screenshot -> read the labelled grid -> ONE action -> look again.
+Grid labels are screen coordinates: pass them to click/move unchanged, including the
+labels of a zoom="X,Y" close-up, which is the way to hit small targets. On a
+multi-monitor desktop use monitor="N" for a closer look at one screen.
+Pass seen="latest" to an action to have it abort if the screen changed since your last
+screenshot (a dialog, another window in front), and shot=true to get the next
+screenshot back from the same call. Use wait(stable=true) after opening a page or app,
+and run(...) for a short fixed sequence of steps.
+Actions are paced like a human, and the server runs one at a time: prefer paste over type
+for more than a sentence or two.
 Never type passwords, 2FA codes or payment details; ask the human first. Ask before
 anything public or irreversible (posting, sending, buying, deleting, accepting terms).
 An error mentioning the failsafe means the human aborted: stop and ask.
@@ -52,8 +57,8 @@ class CommandError(ToolError):
 
 def run_raw(argv: list[str]) -> tuple[int, dict[str, Any]]:
     """Run one CLI command in-process; returns (exit code, payload) without raising."""
-    ai_desktop.LOG_VIA = "mcp"
     with _LOCK, contextlib.redirect_stdout(sys.stderr):
+        ai_desktop.LOG_VIA = "mcp"  # under the lock: a running `run` has set it to mcp/run
         code, payload = ai_desktop.execute(argv, quiet=True)
     if payload is None:
         payload = {"ok": code == 0, "command": argv[0] if argv else None, "code": code}
@@ -73,35 +78,30 @@ def dumps(payload: dict[str, Any]) -> str:
 
 
 def _opt(flag: str, value: Any) -> list[str]:
-    return [] if value is None else [flag, str(value)]
+    # One token, so a value that starts with "-" (text, or a zoom point left of the
+    # primary monitor such as -1500,300) isn't mistaken for an option.
+    return [] if value is None else [f"{flag}={value}"]
 
 
-def inline_image(
-    path: str, grid: bool, spacing: int, origin: tuple[int, int], max_width: int
-) -> tuple[bytes, dict[str, Any]]:
-    """PNG bytes for the client: gridded, and downscaled when wider than `max_width`.
-
-    The file on disk is replaced by the gridded full-size image, so `screenshots latest`
-    shows what the model saw. Labels are enlarged before downscaling so they stay
-    legible; the labels, not the pixel positions, carry the coordinates.
-    """
-    with PILImage.open(path) as opened:
-        img = opened.convert("RGB")
-    width, height = img.size
-    factor = max_width / width if max_width and width > max_width else 1.0
-    if grid:
-        img = ai_desktop.draw_grid(img, spacing, origin=origin, label_scale=1 / factor)
-        img.save(path)
-    if factor < 1:
-        size = (max(1, round(width * factor)), max(1, round(height * factor)))
-        img = img.resize(size, PILImage.Resampling.LANCZOS)
-    buffer = io.BytesIO()
-    img.save(buffer, format="PNG")
-    extra = {"inline_width": img.width, "inline_height": img.height, "inline_scale": round(factor, 4)}
-    return buffer.getvalue(), extra
+def _instant(flag: bool) -> list[str]:
+    return ["--instant"] if flag else []
 
 
-def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
+def _acting(seen: str | None, shot: bool) -> list[str]:
+    return _opt("--seen", seen) + (["--shot"] if shot else [])
+
+
+def _image(path: str) -> Image:
+    return Image(data=Path(path).read_bytes(), format="png")
+
+
+def _with_shot(payload: dict[str, Any]) -> list:
+    """The payload as JSON, plus the --shot screenshot inline when one was taken."""
+    shot = payload.get("shot")
+    return [dumps(payload)] + ([_image(shot)] if shot and shot != "error" else [])
+
+
+def build_server(default_max_width: int | None = None) -> MCPServer:
     try:
         mcp = MCPServer("ai-desktop", instructions=INSTRUCTIONS)
     except TypeError:  # older/newer constructor without `instructions`
@@ -112,54 +112,121 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
 
     @tool(READ_ONLY)
     def screenshot(
-        grid: bool = True, spacing: int = 100, monitor: str = "all", max_width: int | None = None
+        grid: bool = True,
+        spacing: int | None = None,
+        monitor: str = "all",
+        max_width: int | None = None,
+        zoom: str | None = None,
+        cursor: str = "auto",
     ) -> list:
         """Capture the screen (all monitors by default) with a labelled coordinate grid.
 
         Returns the image inline plus JSON with the file path, its size and the global
-        origin (x, y) of the capture. Grid labels ARE screen coordinates: pass them to
-        click unchanged. monitor="1" (an index from the monitors tool) or "primary" zooms
-        into one screen; spacing=50 draws finer lines. max_width only shrinks the inline
-        copy (inline_scale tells by how much); the saved file stays full size.
+        origin (x, y). Grid labels ARE screen coordinates: pass them to click unchanged.
+        monitor="1" (an index from the monitors tool) or "primary" shows one screen.
+        zoom="X,Y" shows the area around that point enlarged with a fine grid, for small
+        targets; its labels are still screen coordinates. Images wider than max_width
+        (default 1920) are shrunk with their labels kept legible; image_scale says by how
+        much. cursor="marker" always draws a crosshair at the pointer, "none" never.
         """
         limit = default_max_width if max_width is None else max_width
-        payload = run(["screenshot", "--monitor", str(monitor)])
-        png, extra = inline_image(payload["path"], grid, spacing, (payload["x"], payload["y"]), limit)
-        payload.update(extra, grid=grid, spacing=spacing if grid else None)
-        return [dumps(payload), Image(data=png, format="png")]
+        argv = ["screenshot", "--monitor", str(monitor)] + _opt("--max-width", limit)
+        argv += (["--grid"] if grid else []) + _opt("--spacing", spacing) + _opt("--zoom", zoom)
+        argv += [] if cursor == "auto" else ["--cursor", cursor]
+        payload = run(argv)
+        return [dumps(payload), _image(payload["path"])]
 
     @tool(ACTION)
-    def click(x: int, y: int, button: str = "left", double: bool = False) -> str:
-        """Click at a screen coordinate (button: left, right or middle)."""
+    def click(
+        x: int,
+        y: int,
+        button: str = "left",
+        double: bool = False,
+        instant: bool = False,
+        seen: str | None = None,
+        shot: bool = False,
+    ) -> list:
+        """Click at a screen coordinate (button: left, right or middle).
+
+        The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
+        straight there. seen="latest" (or a screenshot path) aborts without clicking if
+        the screen around (x, y) changed since that screenshot; shot=true returns a new
+        screenshot taken right after the click."""
         argv = ["click", "--x", str(x), "--y", str(y), "--button", button]
-        return dumps(run(argv + (["--double"] if double else [])))
+        argv += (["--double"] if double else []) + _instant(instant) + _acting(seen, shot)
+        return _with_shot(run(argv))
 
     @tool(ACTION)
-    def move(x: int, y: int) -> str:
-        """Move the mouse to a screen coordinate without clicking."""
-        return dumps(run(["move", "--x", str(x), "--y", str(y)]))
+    def move(x: int, y: int, instant: bool = False, seen: str | None = None, shot: bool = False) -> list:
+        """Move the mouse to a screen coordinate without clicking.
+
+        The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
+        straight there. seen and shot work as for click."""
+        argv = ["move", "--x", str(x), "--y", str(y)] + _instant(instant) + _acting(seen, shot)
+        return _with_shot(run(argv))
 
     @tool(ACTION, name="type")
-    def type_text(text: str, interval: float = 0.02) -> str:
-        """Type printable ASCII text into the focused window. For other characters use paste."""
-        return dumps(run(["type", "--text", text, "--interval", str(interval)]))
+    def type_text(
+        text: str, interval: float = 0.02, instant: bool = False, seen: str | None = None, shot: bool = False
+    ) -> list:
+        """Type printable ASCII text into the focused window. For other characters use paste.
+
+        Typed one key at a time with human-like pauses (about 0.12 s per character and
+        0.25-0.5 s per word, so ~8 s for a 50-character sentence); use paste for longer
+        text, or instant=True to type at a fixed `interval`. seen="latest" aborts if the
+        screen changed much since that screenshot; shot=true returns a new screenshot."""
+        argv = ["type", f"--text={text}", "--interval", str(interval)]
+        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION)
-    def key(key: str) -> str:
+    def key(key: str, seen: str | None = None, shot: bool = False) -> list:
         """Press one key: enter, tab, esc, space, backspace, delete, arrows, home, end,
-        pageup, pagedown, f1-f12, or a single character."""
-        return dumps(run(["key", "--key", key]))
+        pageup, pagedown, f1-f12, or a single character. seen and shot work as for type."""
+        return _with_shot(run(["key", "--key", key] + _acting(seen, shot)))
 
     @tool(ACTION)
-    def hotkey(keys: str) -> str:
-        """Press a combination joined with '+', e.g. ctrl+c, cmd+t, alt+tab, ctrl+shift+t."""
-        return dumps(run(["hotkey", "--keys", keys]))
+    def hotkey(keys: str, seen: str | None = None, shot: bool = False) -> list:
+        """Press a combination joined with '+', e.g. ctrl+c, cmd+t, alt+tab, ctrl+shift+t.
+        seen and shot work as for type."""
+        return _with_shot(run(["hotkey", "--keys", keys] + _acting(seen, shot)))
 
     @tool(ACTION)
-    def scroll(direction: str = "down", amount: int = 3, x: int | None = None, y: int | None = None) -> str:
-        """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y)."""
+    def scroll(
+        direction: str = "down",
+        amount: int = 3,
+        x: int | None = None,
+        y: int | None = None,
+        instant: bool = False,
+        seen: str | None = None,
+        shot: bool = False,
+    ) -> list:
+        """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y).
+
+        The move travels along a human-like path; instant=True jumps straight there. seen
+        and shot work as for click."""
         argv = ["scroll", "--direction", direction, "--amount", str(amount)]
-        return dumps(run(argv + _opt("--x", x) + _opt("--y", y)))
+        argv += _opt("--x", x) + _opt("--y", y) + _instant(instant) + _acting(seen, shot)
+        return _with_shot(run(argv))
+
+    @tool(READ_ONLY)
+    def wait(
+        stable: bool = True, changed: str | None = None, timeout: float = 10.0, shot: bool = False
+    ) -> list:
+        """Wait until the screen stops changing (default), or until it differs from the
+        screenshot `changed` ("latest" or a path). Fails after `timeout` seconds (at most
+        30 here). shot=true returns the final screen as a gridded screenshot."""
+        argv = ["wait"] + (_opt("--changed", changed) if changed else ["--stable"])
+        argv += ["--timeout", str(min(max(timeout, 0.0), 30.0))] + (["--shot"] if shot else [])
+        return _with_shot(run(argv))
+
+    @tool(ACTION, name="run")
+    def run_steps(steps: list[list[str]], shot: bool = False) -> list:
+        """Run several commands in one call, stopping at the first failure. Each step is a
+        CLI argument list, e.g. [["click","--x","500","--y","300"],["type","--text","hi"],
+        ["key","--key","enter"]]. Faster than separate calls; shot=true returns a
+        screenshot after the last step. Only for short sequences you are sure of: look at
+        the screen before trusting the result."""
+        return _with_shot(run(["run", "--steps", json.dumps(steps)] + (["--shot"] if shot else [])))
 
     @tool(ACTION)
     def copy() -> str:
@@ -167,9 +234,10 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
         return dumps(run(["copy"]))
 
     @tool(ACTION)
-    def paste(text: str | None = None) -> str:
-        """Press the paste shortcut; with `text`, put it on the clipboard first (any characters)."""
-        return dumps(run(["paste"] + _opt("--text", text)))
+    def paste(text: str | None = None, seen: str | None = None, shot: bool = False) -> list:
+        """Press the paste shortcut; with `text`, put it on the clipboard first (any
+        characters). seen and shot work as for type."""
+        return _with_shot(run(["paste"] + _opt("--text", text) + _acting(seen, shot)))
 
     @tool(READ_ONLY)
     def clipboard_get() -> str:
@@ -179,7 +247,7 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
     @tool(ACTION)
     def clipboard_set(text: str) -> str:
         """Put text on the clipboard without pressing any keys."""
-        return dumps(run(["clipboard", "set", "--text", text]))
+        return dumps(run(["clipboard", "set"] + _opt("--text", text)))
 
     @tool(READ_ONLY)
     def position() -> str:
@@ -228,5 +296,16 @@ def build_server(default_max_width: int = DEFAULT_MAX_WIDTH) -> MCPServer:
     return mcp
 
 
-def serve(max_width: int = DEFAULT_MAX_WIDTH) -> None:
-    build_server(max_width).run()  # stdio
+def serve(max_width: int | None = None) -> None:
+    """Serve over stdio. `max_width` applies to every screenshot, including the ones
+    actions return with shot=true; without it AI_DESKTOP_MAX_WIDTH or 1920 does."""
+    saved = ai_desktop.MAX_WIDTH_OVERRIDE
+    if max_width is not None:
+        ai_desktop.MAX_WIDTH_OVERRIDE = max_width
+    # The uinput devices stay open for the server's lifetime: only the first action of
+    # each kind waits for the compositor to notice a new device.
+    try:
+        with ai_desktop.keep_devices():
+            build_server(max_width).run()  # stdio
+    finally:
+        ai_desktop.MAX_WIDTH_OVERRIDE = saved

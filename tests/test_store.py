@@ -26,8 +26,13 @@ def test_store_name_pattern():
         "20261012-101905-123.png",
         "20261012-101905-123-grid100.png",
         "20261012-101905-123-2-grid50.png",
+        "20261012-101905-123-m1-zoom-grid20.png",
+        "20261012-101905-123-grid100.raw.png",
     ]
-    bad = ["foo.png", "20261012-101905-123.jpg", "screenshot.png", "x20261012-101905-123.png", ".last-prune"]
+    bad = [
+        "foo.png", "20261012-101905-123.jpg", "screenshot.png", "x20261012-101905-123.png", ".last-prune",
+        "20261012-101905-123-raw.png", "20261012-101905-123.raw.jpg",
+    ]
     assert all(ad.STORE_NAME_RE.match(name) for name in good)
     assert not any(ad.STORE_NAME_RE.match(name) for name in bad)
 
@@ -116,7 +121,7 @@ def test_prune_if_due_runs_at_most_hourly():
     assert ad.prune_if_due() == [second]
 
 
-def fake_capture(backend, monitor="all"):
+def fake_capture(backend, monitor="all", **kwargs):
     return ad.Capture(Image.new("RGB", (64, 48)), 0, 0, 1.0, "all")
 
 
@@ -163,3 +168,12 @@ def test_screenshots_subcommand(run):
 
     _, out, _ = run("screenshots", "clean", "--all")
     assert "deleted=1 kept=0" in out and not new.exists()
+
+
+def test_sidecars_are_hidden_from_listings_but_pruned():
+    folder = ad.store_dir()
+    image = make(folder, "20260101-000000-000-grid100.png", age_days=40)
+    raw = make(folder, "20260101-000000-000-grid100.raw.png", age_days=40)
+    assert ad.store_files() == [(image, ad.store_files()[0][1])]
+    assert {path for path, _ in ad.store_files(include_raw=True)} == {image, raw}
+    assert set(ad.prune_store(30, None)) == {image, raw}

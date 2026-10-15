@@ -61,6 +61,13 @@ def test_click_and_hotkey_cli(run, fake_gui):
     assert fake_gui.calls[-1] == (
         "click", (), {"x": 500, "y": 300, "button": "left", "clicks": 2, "interval": 0.1},
     )
+    # The pointer glides from (10, 20) along waypoints first: on screen, never a corner.
+    moves = [call for call in fake_gui.calls if call[0] == "moveTo"]
+    assert len(moves) >= 7
+    corners = {(0, 0), (1919, 0), (0, 1079), (1919, 1079)}
+    for _, (x, y), kwargs in moves:
+        assert kwargs == {"_pause": False}
+        assert 0 <= x < 1920 and 0 <= y < 1080 and (x, y) not in corners
     code, _, _ = run("hotkey", "--keys", "ctrl+shift+t")
     assert code == 0 and fake_gui.calls[-1][1] == ("ctrl", "shift", "t")
     code, _, err = run("hotkey", "--keys", "ctrl+")
@@ -70,15 +77,24 @@ def test_click_and_hotkey_cli(run, fake_gui):
 def test_corner_click_is_rejected_before_acting(run, fake_gui):
     code, _, err = run("click", "--x", "0", "--y", "0")
     assert code == 1 and "failsafe corner" in err
-    assert not any(call[0] == "click" for call in fake_gui.calls)
+    assert not any(call[0] in ("click", "moveTo") for call in fake_gui.calls)
 
 
 def test_type_rejects_non_ascii(run, fake_gui):
     code, _, err = run("type", "--text", "héllo")
     assert code == 1 and "ASCII" in err
     assert not any(call[0] == "write" for call in fake_gui.calls)
-    code, _, _ = run("type", "--text", "Hi!")
+    code, _, _ = run("type", "--text", "Hi!", "--instant")
     assert code == 0 and fake_gui.calls[-1] == ("write", ("Hi!",), {"interval": 0.02})
+
+
+def test_type_sends_one_key_at_a_time(run, fake_gui, sleeps):
+    code, out, _ = run("type", "--text", "Hi!")
+    assert code == 0 and out == "OK type chars=3\n"
+    assert fake_gui.calls == [
+        ("write", (ch,), {"interval": 0, "_pause": False}) for ch in "Hi!"
+    ]
+    assert len(sleeps) == 2 and all(0.10 <= s <= 0.15 for s in sleeps)
 
 
 def test_failsafe_during_an_action(run, fake_gui):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import random
 import sys
 import types
 
@@ -32,6 +33,27 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_desktop, "CURRENT_COMMAND", None)
     monkeypatch.setattr(ai_desktop, "LOG_VIA", "cli")
     monkeypatch.setattr(ai_desktop, "detect_monitors", lambda backend: ([FAKE_MONITOR], "fake"))
+    monkeypatch.setattr(ai_desktop, "RNG", random.Random(0))
+    monkeypatch.setattr(ai_desktop, "HUMAN_INPUT", True)
+    monkeypatch.setattr(ai_desktop, "MAX_WIDTH_OVERRIDE", None)
+
+
+@pytest.fixture(autouse=True)
+def sleeps(monkeypatch):
+    """Record the pacing and polling waits instead of sleeping through them.
+
+    A fake clock (`_now`) advances by each recorded wait, so `wait --timeout` loops end.
+    """
+    calls = []
+    clock = [1000.0]
+
+    def fake_sleep(seconds):
+        calls.append(seconds)
+        clock[0] += seconds
+
+    monkeypatch.setattr(ai_desktop, "_sleep", fake_sleep)
+    monkeypatch.setattr(ai_desktop, "_now", lambda: clock[0])
+    return calls
 
 
 @pytest.fixture

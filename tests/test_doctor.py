@@ -21,7 +21,7 @@ def quiet_doctor(monkeypatch, fake_gui):
     """Doctor with every desktop-touching check replaced by a harmless stand-in."""
     monkeypatch.setattr(
         ad, "capture_screen",
-        lambda backend, monitor="all": ad.Capture(Image.new("RGB", (1920, 1080)), 0, 0, 1.0, "all"),
+        lambda backend, monitor="all", **kwargs: ad.Capture(Image.new("RGB", (1920, 1080)), 0, 0, 1.0, "all"),
     )
     monkeypatch.setattr(ad, "_clipboard_tools", lambda: (["fakeclip"], ["fakeclip"]))
     monkeypatch.setattr(ad, "find_chrome_executable", lambda: "/fake/chrome")

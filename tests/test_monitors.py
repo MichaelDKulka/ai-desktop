@@ -128,7 +128,7 @@ def test_linux_capture_crops_one_monitor(monkeypatch):
     monkeypatch.setattr(ad, "detect_monitors", lambda b: (monitors, "fake"))
     root = Image.new("RGB", (3840, 1080), (1, 1, 1))
     root.paste(Image.new("RGB", (1920, 1080), (9, 9, 9)), (1920, 0))
-    monkeypatch.setattr(ad, "grab_linux", lambda: root)
+    monkeypatch.setattr(ad, "grab_linux", lambda cursor=False: root)
     backend = SizedBackend(3840, 1080)
     cap = ad.capture_screen(backend, "1")
     assert cap.image.size == (1920, 1080) and (cap.x, cap.y) == (1920, 0) and cap.monitor == "1"
@@ -143,7 +143,7 @@ def test_macos_capture_stitches_retina_displays(monkeypatch):
     monkeypatch.setattr(ad, "detect_monitors", lambda b: (monitors, "fake"))
     monkeypatch.setattr(
         ad, "_screencapture_rect",
-        lambda x, y, w, h: Image.new("RGB", (w * 2, h * 2), (x & 255, 0, 0)),
+        lambda x, y, w, h, cursor=False: Image.new("RGB", (w * 2, h * 2), (x & 255, 0, 0)),
     )
     backend = SizedBackend(100, 50)
     cap = ad.capture_screen(backend, "all")
@@ -194,7 +194,7 @@ def test_monitors_command(run, fake_gui):
 
 
 def test_screenshot_reports_origin_and_monitor(run, fake_gui, monkeypatch):
-    def capture(backend, monitor="all"):
+    def capture(backend, monitor="all", **kwargs):
         label = "1" if monitor == "1" else "all"
         return ad.Capture(Image.new("RGB", (64, 48)), -64, 0, 1.0, label)
 
