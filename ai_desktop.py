@@ -203,10 +203,25 @@ def host_env() -> dict[str, str]:
 
 
 def is_wayland() -> bool:
+    """A Linux Wayland session. XDG_SESSION_TYPE says so, but a compositor started from a
+    text console (sway without a display manager) inherits "tty": then WAYLAND_DISPLAY
+    decides, unless the session is explicitly x11."""
     if not sys.platform.startswith("linux"):
         return False
-    session = os.environ.get("XDG_SESSION_TYPE", "").lower()
-    return session == "wayland" or (not session and bool(os.environ.get("WAYLAND_DISPLAY")))
+    session = os.environ.get("XDG_SESSION_TYPE", "").strip().lower()
+    return session == "wayland" or (session != "x11" and bool(os.environ.get("WAYLAND_DISPLAY")))
+
+
+def desktop_name() -> str:
+    """gnome, kde, wlroots (Sway, Hyprland and the like) or other."""
+    desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    if "gnome" in desktop:
+        return "gnome"
+    if "kde" in desktop:
+        return "kde"
+    if any(name in desktop for name in ("sway", "hyprland", "river", "wayfire", "labwc", "niri", "wlroots")):
+        return "wlroots"
+    return "other"
 
 
 # --- Grid overlay ------------------------------------------------------------------------
@@ -534,59 +549,99 @@ def read_image_meta(path: str | Path) -> dict | None:
 
 # --- Screen capture ----------------------------------------------------------------------
 
-# Tried in order on Linux. Wayland needs one of these (pyautogui can't see native windows);
-# on X11 they are preferred too, because we run them ourselves with host_env().
-LINUX_SCREENSHOT_TOOLS = (
-    ["gnome-screenshot", "-f"],
-    ["grim"],
-    ["spectacle", "-b", "-n", "-o"],
-)
+# Wayland needs one of these (pyautogui can't see native windows); on X11 they are
+# preferred too, because we run them ourselves with host_env().
+LINUX_SCREENSHOT_TOOLS = {
+    "gnome-screenshot": ["gnome-screenshot", "-f"],
+    "grim": ["grim"],
+    "spectacle": ["spectacle", "-b", "-n", "-o"],
+}
+# Which tools can work in which session, best first. grim needs wlroots' screencopy, and
+# gnome-screenshot captures only Xwayland's empty root on other Wayland desktops.
+SCREENSHOT_TOOL_ORDER = {
+    ("wayland", "gnome"): ("gnome-screenshot",),
+    ("wayland", "kde"): ("spectacle",),
+    ("wayland", "wlroots"): ("grim", "spectacle"),
+    ("wayland", "other"): ("grim", "spectacle", "gnome-screenshot"),
+    ("x11", "kde"): ("spectacle", "gnome-screenshot"),
+}
+X11_TOOL_ORDER = ("gnome-screenshot", "spectacle")
 # The flag that makes each tool draw the mouse pointer into the capture.
 CURSOR_FLAGS = {"gnome-screenshot": ["-p"], "grim": ["-c"], "spectacle": ["-p"]}
+_LAST_CAPTURE_TOOL: str | None = None  # the tool that made the latest Linux capture
+
+
+def screenshot_tools() -> list[list[str]]:
+    """The installed screenshot tools that suit this session, best first."""
+    session = "wayland" if is_wayland() else "x11"
+    order = SCREENSHOT_TOOL_ORDER.get((session, desktop_name()), X11_TOOL_ORDER if session == "x11" else ())
+    return [LINUX_SCREENSHOT_TOOLS[name] for name in order if shutil.which(name)]
 
 
 def find_screenshot_tool() -> list[str] | None:
-    return next((argv for argv in LINUX_SCREENSHOT_TOOLS if shutil.which(argv[0])), None)
+    tools = screenshot_tools()
+    return tools[0] if tools else None
 
 
 def linux_cursor_supported() -> bool:
-    tool = find_screenshot_tool()
-    return tool is not None and tool[0] in CURSOR_FLAGS
+    tool = _LAST_CAPTURE_TOOL or (find_screenshot_tool() or [None])[0]
+    return tool in CURSOR_FLAGS
 
 
-def grab_linux(cursor: bool = False) -> Image.Image:
-    """Capture the whole X root / Wayland desktop; `cursor` asks the tool to draw the pointer."""
-    tool = find_screenshot_tool()
-    if tool is None:
-        if is_wayland():
-            raise CliError(
-                "no Wayland screenshot tool found; install one: "
-                "sudo apt install gnome-screenshot (GNOME), grim (Sway/Hyprland) or spectacle (KDE)"
-            )
-        # X11 without a tool: Pillow's own XCB capture. pyautogui's screenshot() is no use
-        # here, since it refuses to run on Linux unless gnome-screenshot is installed.
-        try:
-            return ImageGrab.grab(xdisplay=os.environ.get("DISPLAY")).convert("RGB")
-        except OSError as exc:
-            raise CliError(
-                f"cannot capture the X11 screen: {exc}; install a screenshot tool: "
-                "sudo apt install gnome-screenshot"
-            ) from exc
+def _run_screenshot_tool(tool: list[str], cursor: bool) -> Image.Image:
     fd, path = tempfile.mkstemp(prefix="ai_desktop_", suffix=".png")
     os.close(fd)
     # The flag goes right after the program name: the tools' last option takes the path.
     flags = CURSOR_FLAGS.get(tool[0], []) if cursor else []
     try:
-        result = subprocess.run(
-            [tool[0], *flags, *tool[1:], path], capture_output=True, text=True, timeout=30, env=host_env()
-        )
+        try:
+            result = subprocess.run(
+                [tool[0], *flags, *tool[1:], path], capture_output=True, text=True, timeout=30, env=host_env()
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise CliError(f"{tool[0]} did not finish within {exc.timeout:g} s") from exc
         if result.returncode != 0 or os.path.getsize(path) == 0:
-            detail = result.stderr.strip() or f"exit code {result.returncode}"
-            raise CliError(f"{tool[0]} failed: {detail}")
+            detail = result.stderr.strip().splitlines()[-1:] or [f"exit code {result.returncode}"]
+            raise CliError(f"{tool[0]} failed: {detail[0]}")
         with Image.open(path) as img:
             return img.convert("RGB")
     finally:
         os.remove(path)
+
+
+def grab_linux(cursor: bool = False) -> Image.Image:
+    """Capture the whole X root / Wayland desktop; `cursor` asks the tool to draw the pointer.
+    Each suitable tool is tried in turn, then on X11 Pillow's own capture."""
+    global _LAST_CAPTURE_TOOL
+    _LAST_CAPTURE_TOOL = None
+    errors = []
+    for tool in screenshot_tools():
+        try:
+            img = _run_screenshot_tool(tool, cursor)
+        except CliError as exc:
+            errors.append(str(exc))
+            continue
+        _LAST_CAPTURE_TOOL = tool[0]
+        return img
+    if is_wayland():
+        if errors:
+            raise CliError("cannot capture the screen: " + "; ".join(errors))
+        raise CliError(
+            "no Wayland screenshot tool found for this desktop; install one: "
+            "sudo apt install gnome-screenshot (GNOME), grim (Sway/Hyprland) or spectacle (KDE)"
+        )
+    # X11 without a working tool: Pillow's own XCB capture. pyautogui's screenshot() is no
+    # use here, since it refuses to run on Linux unless gnome-screenshot is installed.
+    try:
+        img = ImageGrab.grab(xdisplay=os.environ.get("DISPLAY")).convert("RGB")
+    except OSError as exc:
+        errors.append(f"Pillow: {exc}")
+        raise CliError(
+            "cannot capture the X11 screen: " + "; ".join(errors) + "; install a screenshot tool: "
+            "sudo apt install gnome-screenshot"
+        ) from exc
+    _LAST_CAPTURE_TOOL = "pillow"
+    return img
 
 
 # --- Monitors ----------------------------------------------------------------------------
@@ -985,28 +1040,37 @@ def prune_store(
     keep_days: float | None, keep_mb: float | None, now: float | None = None, keep: tuple = ()
 ) -> list[Path]:
     """Delete store files older than `keep_days`, then the oldest until the total is under
-    `keep_mb`. `None` disables a rule. The files in `keep` (the screenshot just taken)
-    are never deleted but count towards the total. Returns the paths that were removed."""
+    `keep_mb`. `None` disables a rule. A screenshot and its `.raw.png` copy are judged and
+    deleted together, by the newer of the two, so --seen never finds half a pair. Pairs
+    with a file in `keep` (the screenshot just taken) are never deleted but count towards
+    the total. Returns the paths that were removed."""
     now = time.time() if now is None else now
     protected = {Path(p).resolve() for p in keep}
-    files = store_files(include_raw=True)
-    if protected:
-        kept_size = sum(st.st_size for path, st in files if path.resolve() in protected)
-        files = [(path, st) for path, st in files if path.resolve() not in protected]
-    else:
-        kept_size = 0
+    groups: dict[str, list[tuple[Path, os.stat_result]]] = {}
+    for path, st in store_files(include_raw=True):
+        stem = path.name[: -len(RAW_SUFFIX)] if path.name.endswith(RAW_SUFFIX) else path.name[: -len(".png")]
+        groups.setdefault(stem, []).append((path, st))
+    pairs = []  # (newest mtime, total size, paths), newest first
+    kept_size = 0
+    for members in groups.values():
+        size = sum(st.st_size for _, st in members)
+        if any(path.resolve() in protected for path, _ in members):
+            kept_size += size
+            continue
+        pairs.append((max(st.st_mtime for _, st in members), size, [path for path, _ in members]))
+    pairs.sort(key=lambda pair: pair[0], reverse=True)
     doomed: list[Path] = []
     if keep_days is not None:
         cutoff = now - keep_days * 86400
-        doomed += [path for path, st in files if st.st_mtime < cutoff]
-        files = [(path, st) for path, st in files if st.st_mtime >= cutoff]
+        doomed += [path for mtime, _, paths in pairs if mtime < cutoff for path in paths]
+        pairs = [pair for pair in pairs if pair[0] >= cutoff]
     if keep_mb is not None:
-        total = kept_size + sum(st.st_size for _, st in files)
+        total = kept_size + sum(size for _, size, _ in pairs)
         limit = keep_mb * 1024 * 1024
-        while files and total > limit:
-            path, st = files.pop()  # the oldest is last
-            doomed.append(path)
-            total -= st.st_size
+        while pairs and total > limit:
+            _, size, paths = pairs.pop()  # the oldest is last
+            doomed.extend(paths)
+            total -= size
     removed = []
     for path in doomed:
         try:
@@ -2667,7 +2731,7 @@ def _check_linux_screenshot_tool():
     if is_wayland():
         return (
             "fail",
-            "none found",
+            f"none found that works on this desktop ({desktop_name()})",
             "sudo apt install gnome-screenshot (GNOME), grim (Sway/Hyprland) or spectacle (KDE)",
         )
     return (

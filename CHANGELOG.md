@@ -59,6 +59,17 @@
   an image on the clipboard no longer comes back as bytes.
 - **The monitor layout is detected once per command** instead of up to eight times (each
   an `xrandr` run on Linux).
+- **Screenshot tools that suit the desktop, one after another.** Only the first installed
+  tool was ever run, whether or not it worked there (gnome-screenshot on KDE captures
+  Xwayland's empty root; grim needs wlroots). Now the tools that suit the session are tried
+  in turn (GNOME: gnome-screenshot; KDE: spectacle; Sway, Hyprland: grim, then spectacle),
+  then on X11 Pillow's own capture, and the error lists every failure.
+- **Wayland started from a text console is Wayland.** A compositor started without a
+  display manager inherits `XDG_SESSION_TYPE=tty`, so `auto` picked pyautogui, whose input
+  never reaches native Wayland windows. `WAYLAND_DISPLAY` now decides unless the session is
+  `x11`.
+- **A screenshot and its `.raw.png` copy are pruned together**, judged by the newer of the
+  two, so `--seen` never finds half a pair.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

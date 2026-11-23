@@ -36,6 +36,7 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_desktop, "RNG", random.Random(0))
     monkeypatch.setattr(ai_desktop, "HUMAN_INPUT", True)
     monkeypatch.setattr(ai_desktop, "MAX_WIDTH_OVERRIDE", None)
+    monkeypatch.setattr(ai_desktop, "_LAST_CAPTURE_TOOL", None)
 
 
 @pytest.fixture(autouse=True)

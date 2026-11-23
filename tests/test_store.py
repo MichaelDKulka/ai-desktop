@@ -177,3 +177,32 @@ def test_sidecars_are_hidden_from_listings_but_pruned():
     assert ad.store_files() == [(image, ad.store_files()[0][1])]
     assert {path for path, _ in ad.store_files(include_raw=True)} == {image, raw}
     assert set(ad.prune_store(30, None)) == {image, raw}
+
+
+def test_prune_keeps_a_screenshot_and_its_raw_copy_together():
+    folder = ad.store_dir()
+    # The size rule pops the oldest file; with a pair whose copy is a little older than the
+    # screenshot (written right after it, but the clock says otherwise), it split the pair.
+    old_img = make(folder, "20260101-000000-000-grid100.png", age_days=2.0, size=1000)
+    old_raw = make(folder, "20260101-000000-000-grid100.raw.png", age_days=2.1, size=1000)
+    new_img = make(folder, "20260102-000000-000-grid100.png", age_days=1.0, size=1000)
+    new_raw = make(folder, "20260102-000000-000-grid100.raw.png", age_days=1.0, size=1000)
+    removed = ad.prune_store(None, 2500 / (1024 * 1024))
+    assert set(removed) == {old_img, old_raw}
+    assert new_img.exists() and new_raw.exists()
+
+
+def test_prune_by_age_judges_a_pair_by_its_newer_file():
+    folder = ad.store_dir()
+    img = make(folder, "20260101-000000-000.png", age_days=29)
+    raw = make(folder, "20260101-000000-000.raw.png", age_days=31)
+    assert ad.prune_store(30, None) == []
+    assert img.exists() and raw.exists()
+
+
+def test_prune_protects_the_whole_pair_just_written():
+    folder = ad.store_dir()
+    img = make(folder, "20260101-000000-000.png", age_days=40)
+    raw = make(folder, "20260101-000000-000.raw.png", age_days=40)
+    assert ad.prune_store(30, None, keep=(img,)) == []
+    assert raw.exists()

@@ -28,11 +28,45 @@ def test_capture_normalizes_hidpi_to_logical_size(monkeypatch):
     assert cap.scale == 2.0 and (cap.x, cap.y) == (0, 0) and cap.monitor == "all"
 
 
+def session(monkeypatch, kind, desktop=""):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_SESSION_TYPE", kind)
+    monkeypatch.setenv("XDG_CURRENT_DESKTOP", desktop)
+    if kind == "wayland":
+        monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-0")
+
+
 def test_find_screenshot_tool(monkeypatch):
+    session(monkeypatch, "wayland", "sway")
     monkeypatch.setattr(ad.shutil, "which", lambda n: "/usr/bin/grim" if n == "grim" else None)
     assert ad.find_screenshot_tool() == ["grim"]
     monkeypatch.setattr(ad.shutil, "which", lambda n: None)
     assert ad.find_screenshot_tool() is None
+
+
+@pytest.mark.parametrize("kind,desktop,expected", [
+    ("wayland", "ubuntu:GNOME", ["gnome-screenshot"]),
+    ("wayland", "KDE", ["spectacle"]),  # gnome-screenshot would capture Xwayland's empty root
+    ("wayland", "sway", ["grim", "spectacle"]),
+    ("x11", "ubuntu:GNOME", ["gnome-screenshot", "spectacle"]),  # grim needs wlroots
+    ("x11", "KDE", ["spectacle", "gnome-screenshot"]),
+])
+def test_screenshot_tools_suit_the_session(monkeypatch, kind, desktop, expected):
+    session(monkeypatch, kind, desktop)
+    monkeypatch.setattr(ad.shutil, "which", lambda n: f"/usr/bin/{n}")
+    assert [t[0] for t in ad.screenshot_tools()] == expected
+
+
+@pytest.mark.parametrize("kind,wayland_display,expected", [
+    ("wayland", "", True), ("tty", "wayland-1", True), ("", "wayland-0", True),
+    ("x11", "wayland-0", False), ("tty", "", False), ("", "", False),
+])
+def test_is_wayland(monkeypatch, kind, wayland_display, expected):
+    # sway started from a text console inherits XDG_SESSION_TYPE=tty
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setenv("XDG_SESSION_TYPE", kind)
+    monkeypatch.setenv("WAYLAND_DISPLAY", wayland_display)
+    assert ad.is_wayland() is expected
 
 
 def test_grab_linux_on_x11_falls_back_to_pillow(monkeypatch):
@@ -87,7 +121,9 @@ def fake_tool(monkeypatch):
         ("spectacle", ["spectacle", "-p", "-b", "-n", "-o"]),
     ],
 )
-def test_grab_linux_asks_the_tool_for_the_pointer(fake_tool, tool, with_cursor):
+def test_grab_linux_asks_the_tool_for_the_pointer(fake_tool, tool, with_cursor, monkeypatch):
+    desktop = {"gnome-screenshot": "GNOME", "grim": "sway", "spectacle": "KDE"}[tool]
+    session(monkeypatch, "wayland", desktop)
     fake_tool(tool)
     ad.grab_linux(cursor=True)
     assert fake_tool.runs[-1][:-1] == with_cursor
@@ -200,3 +236,43 @@ def test_grab_linux_on_wayland_needs_a_tool(monkeypatch):
     monkeypatch.setattr(ad.shutil, "which", lambda n: None)
     with pytest.raises(ad.CliError, match="screenshot tool"):
         ad.grab_linux()
+
+
+def test_grab_linux_falls_through_to_the_next_tool(monkeypatch):
+    session(monkeypatch, "wayland", "sway")
+    monkeypatch.setattr(ad.shutil, "which", lambda n: f"/usr/bin/{n}")
+    runs = []
+
+    def fake_run(argv, **kwargs):
+        runs.append(argv[0])
+        if argv[0] == "grim":
+            return types.SimpleNamespace(returncode=1, stderr="compositor doesn't support wlr-screencopy")
+        Image.new("RGB", (8, 6)).save(argv[-1])
+        return types.SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    img = ad.grab_linux(cursor=True)
+    assert img.size == (8, 6) and runs == ["grim", "spectacle"] and ad._LAST_CAPTURE_TOOL == "spectacle"
+
+
+def test_grab_linux_reports_every_failure(monkeypatch):
+    session(monkeypatch, "wayland", "sway")
+    monkeypatch.setattr(ad.shutil, "which", lambda n: f"/usr/bin/{n}")
+
+    def fake_run(argv, **kwargs):
+        if argv[0] == "spectacle":
+            raise ad.subprocess.TimeoutExpired(argv, 30)
+        return types.SimpleNamespace(returncode=1, stderr="no screencopy")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    with pytest.raises(ad.CliError) as info:
+        ad.grab_linux()
+    assert "grim failed: no screencopy" in str(info.value) and "spectacle did not finish within 30 s" in str(info.value)
+
+
+def test_x11_falls_back_to_pillow_after_a_failing_tool(monkeypatch):
+    session(monkeypatch, "x11", "GNOME")
+    monkeypatch.setattr(ad.shutil, "which", lambda n: "/usr/bin/gnome-screenshot" if n == "gnome-screenshot" else None)
+    monkeypatch.setattr(ad.subprocess, "run", lambda argv, **kw: types.SimpleNamespace(returncode=1, stderr="boom"))
+    monkeypatch.setattr(ad.ImageGrab, "grab", lambda xdisplay=None: Image.new("RGB", (4, 4)))
+    assert ad.grab_linux().size == (4, 4) and ad._LAST_CAPTURE_TOOL == "pillow"
