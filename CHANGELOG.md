@@ -27,6 +27,21 @@
   bypasses it. The held move uses `dragTo`, which macOS needs to send drag events.
 - **`scroll --x --y` on Windows** moves the pointer there first; pyautogui's Windows scroll
   ignores the coordinates, so the pane under the old pointer position scrolled.
+- **Private store.** Screenshots of the whole desktop, the action log, the pointer memory
+  and the stop file were readable by every local user (folders 775, files 664). Files are
+  now created 0600 and the tool's folders 0700, including an existing `~/.ai-desktop`; a
+  folder set with `AI_DESKTOP_HOME` keeps its own mode, and so does the folder of `-o`.
+- **Values that begin with a dash.** `screenshot --zoom -1420,400` (a monitor left of the
+  primary), `type --text -la`, `focus --title -draft` and the like were usage errors,
+  because argparse read the value as an option. They work now, as in the MCP tools.
+- **No tracebacks.** An unexpected error, or a capture or clipboard tool that hangs past
+  its timeout, ended in a Python traceback with no `ERROR` line and no JSON. Now it is
+  `ERROR internal error: ...` or `ERROR gnome-screenshot did not finish within 30 s ...`,
+  exit 1; `AI_DESKTOP_DEBUG=1` adds the traceback on stderr.
+- **One-line argument errors in `run` and MCP.** A bad step or tool argument returned
+  argparse's whole usage block; it is now the reason plus `(see: ai-desktop click --help)`.
+  A `run` step with an unbalanced quote no longer copies the step's text, which is often
+  typed text, into the error and the action log. A `--file` that isn't UTF-8 is exit 2.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

@@ -28,11 +28,13 @@ import random
 import re
 import shlex
 import shutil
+import stat
 import struct
 import subprocess
 import sys
 import tempfile
 import time
+import traceback
 import types
 import uuid
 from datetime import datetime
@@ -452,17 +454,69 @@ def draw_grid(
     return Image.alpha_composite(base, overlay).convert("RGB")
 
 
+def _tighten(path: Path, mode: int) -> None:
+    """Remove group and other access from a file or folder the tool owns (POSIX only)."""
+    if os.name != "posix":
+        return
+    try:
+        if stat.S_IMODE(path.stat().st_mode) != mode:
+            os.chmod(path, mode)
+    except OSError:
+        pass  # not ours, or gone: never fail a command over this
+
+
+def private_dir(path: Path) -> Path:
+    """Create a folder for the tool's own files. Screenshots of the whole desktop and the
+    action log must not be readable by other local users, so every folder from home_dir()
+    down to `path` is made 0700. The home folder itself only when it is the default
+    `.ai-desktop` or was created just now: AI_DESKTOP_HOME may point at the user's own folder."""
+    path = Path(path)
+    home = home_dir()
+    created_home = not home.exists()
+    path.mkdir(parents=True, exist_ok=True)
+    if os.name != "posix":
+        return path
+    if created_home or home.name == ".ai-desktop":
+        _tighten(home, 0o700)
+    try:
+        rel = path.resolve().relative_to(home.resolve())
+    except (ValueError, OSError):
+        return path
+    folder = home
+    for part in rel.parts:
+        folder = folder / part
+        _tighten(folder, 0o700)
+    return path
+
+
+def private_file(path: str | Path, mode: str = "w", encoding: str | None = "utf-8"):
+    """Open a file for writing that only its owner can read (0600 on POSIX)."""
+    flags = os.O_WRONLY | os.O_CREAT | (os.O_APPEND if mode.startswith("a") else os.O_TRUNC)
+    fd = os.open(path, flags | getattr(os, "O_BINARY", 0), 0o600)
+    _tighten(Path(path), 0o600)  # an existing file keeps its mode under os.open
+    return os.fdopen(fd, mode, encoding=None if "b" in mode else encoding)
+
+
 def save_image(img: Image.Image, output: str | Path, meta: dict | None = None, **save_kwargs) -> str:
-    """Save `img`; a PNG also gets `meta` as an `ai-desktop` text chunk (origin, scale, ...)."""
+    """Save `img`, readable only by its owner; a PNG also gets `meta` as an `ai-desktop`
+    text chunk (origin, scale, ...)."""
     path = Path(output).expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if meta is not None and path.suffix.lower() == ".png":
+    try:
+        path.parent.relative_to(home_dir().expanduser().resolve())
+        private_dir(path.parent)
+    except ValueError:
+        path.parent.mkdir(parents=True, exist_ok=True)  # the caller's own folder (-o): left as is
+    fmt = Image.registered_extensions().get(path.suffix.lower())
+    if fmt is None:
+        raise CliError(f"cannot save {path}: unknown file extension {path.suffix or '(none)'!r}")
+    if meta is not None and fmt == "PNG":
         info = PngImagePlugin.PngInfo()
         info.add_text(META_KEY, json.dumps(meta))
         save_kwargs["pnginfo"] = info
     try:
-        img.save(path, **save_kwargs)
-    except ValueError as exc:  # unknown file extension
+        with private_file(path, "wb") as fh:
+            img.save(fh, format=fmt, **save_kwargs)
+    except ValueError as exc:  # a mode the format can't store
         raise CliError(f"cannot save {path}: {exc}") from exc
     return str(path)
 
@@ -1054,9 +1108,8 @@ def log_action(args: argparse.Namespace, code: int, payload: dict | None, starte
             "ms": int((time.monotonic() - started) * 1000),
             "result": result,
         }
-        folder = log_dir()
-        folder.mkdir(parents=True, exist_ok=True)
-        with open(folder / f"actions-{now:%Y%m%d}.jsonl", "a", encoding="utf-8") as fh:
+        folder = private_dir(log_dir())
+        with private_file(folder / f"actions-{now:%Y%m%d}.jsonl", "a") as fh:
             fh.write(json.dumps(entry, default=str) + "\n")
     except Exception:
         return
@@ -1310,9 +1363,8 @@ def synthetic_start(target: tuple[int, int], monitor: Monitor, rng: random.Rando
 def remember_pointer(x: int, y: int) -> None:
     """Keep where the tool last put the pointer; Wayland won't tell us. Never raises."""
     try:
-        home = home_dir()
-        home.mkdir(parents=True, exist_ok=True)
-        (home / POINTER_FILE).write_text(json.dumps({"x": x, "y": y}), encoding="utf-8")
+        with private_file(private_dir(home_dir()) / POINTER_FILE) as fh:
+            fh.write(json.dumps({"x": x, "y": y}))
     except OSError:
         pass
 
@@ -3679,8 +3731,12 @@ def split_step(step: str, i: int) -> list[str]:
     try:
         return list(lex)
     except ValueError as exc:
+        # Name only the command: the rest of the step is often typed text, and this error
+        # goes to the action log, which keeps typed text out.
+        command = step.split(None, 1)[0] if step.split() else "?"
         raise CliError(
-            f"step {i}: cannot split {step!r} ({exc}); quote it properly or use a list of arguments",
+            f"step {i} ({command}): cannot split the command string ({exc}); "
+            "quote it properly or use a list of arguments",
             code=2,
         ) from exc
 
@@ -3695,9 +3751,11 @@ def load_steps(args: argparse.Namespace) -> list[list[str]]:
         text = sys.stdin.read()
     else:
         try:
-            text = Path(args.file).expanduser().read_text(encoding="utf-8")
+            text = Path(args.file).expanduser().read_text(encoding="utf-8-sig")
         except OSError as exc:
             raise CliError(f"cannot read --file {args.file}: {exc}") from exc
+        except UnicodeDecodeError as exc:
+            raise CliError(f"cannot read --file {args.file}: it is not UTF-8 text ({exc.reason})", code=2) from exc
     example = 'e.g. [["click","--x","500","--y","300"],["key","--key","enter"]]'
     try:
         data = json.loads(text)
@@ -3785,9 +3843,10 @@ def cmd_run(args: argparse.Namespace) -> None:
 def cmd_stop(args: argparse.Namespace) -> None:
     path = stop_path()
     was_stopped = path.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
+    private_dir(path.parent)
     note = {"since": datetime.now().isoformat(timespec="seconds"), "reason": args.reason or ""}
-    path.write_text(json.dumps(note) + "\n", encoding="utf-8")
+    with private_file(path) as fh:
+        fh.write(json.dumps(note) + "\n")
     status("stop", stopped=True, was_stopped=was_stopped, path=str(path))
 
 
@@ -4205,10 +4264,40 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# Options whose value may begin with a dash: text to type or paste, window titles, a zoom
+# point left of the primary monitor (-1420,400), the minus key. argparse would read such a
+# value as another option, so `--text -la` is joined into the one token `--text=-la`.
+DASH_VALUE_OPTIONS = ("--text", "--zoom", "--title", "--app", "--id", "--url", "--key", "--keys", "--reason", "--profile")
+
+
+def join_dash_values(argv: list[str]) -> list[str]:
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token in DASH_VALUE_OPTIONS and i + 1 < len(argv) and argv[i + 1].startswith("-"):
+            out.append(f"{token}={argv[i + 1]}")
+            i += 2
+            continue
+        out.append(token)
+        i += 1
+    return out
+
+
+def _argparse_error(text: str) -> str:
+    """The reason in argparse's usage-plus-error output, on one line, with where to look."""
+    for line in reversed(text.splitlines()):
+        prog, sep, reason = line.partition(": error: ")
+        if sep:
+            return f"{reason.strip()} (see: {prog.strip()} --help)"
+    return " ".join(text.split())
+
+
 def parse_quiet(argv: list[str] | None) -> tuple[argparse.Namespace | None, dict | None]:
     """Parse without printing: (args, None), or (None, payload) for --help, --version and
     bad arguments. The payload carries `code` unless it is the 0 of --help/--version."""
     buffer = io.StringIO()
+    argv = join_dash_values(sys.argv[1:] if argv is None else list(argv))
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
             return build_parser().parse_args(argv), None
@@ -4217,7 +4306,7 @@ def parse_quiet(argv: list[str] | None) -> tuple[argparse.Namespace | None, dict
         text = buffer.getvalue().strip()
         if code == 0:  # --help / --version
             return None, {"ok": True, "command": None, "text": text}
-        return None, {"ok": False, "command": None, "error": f"bad arguments: {text}", "code": code}
+        return None, {"ok": False, "command": None, "error": f"bad arguments: {_argparse_error(text)}", "code": code}
 
 
 def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, dict | None]:
@@ -4242,7 +4331,7 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
                 code = payload.get("code", 0)
                 return code, LAST_PAYLOAD
         else:
-            args = build_parser().parse_args(argv)
+            args = build_parser().parse_args(join_dash_values(sys.argv[1:] if argv is None else list(argv)))
         args.backend = getattr(args, "backend", None) or os.environ.get("AI_DESKTOP_BACKEND", "auto")
         JSON_OUTPUT = bool(getattr(args, "json", False)) or os.environ.get(
             "AI_DESKTOP_JSON", ""
@@ -4260,6 +4349,13 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
             code = fail(str(exc), EXIT_ERROR)
         except KeyboardInterrupt:
             code = fail("interrupted", 130)
+        except subprocess.TimeoutExpired as exc:
+            tool = exc.cmd[0] if isinstance(exc.cmd, (list, tuple)) and exc.cmd else str(exc.cmd)
+            code = fail(
+                f"{Path(str(tool)).name} did not finish within {exc.timeout:g} s "
+                "(a permission prompt, a locked screen, or a hung tool?)",
+                EXIT_ERROR,
+            )
         except Exception as exc:
             gui = sys.modules.get("pyautogui")
             if gui is not None and isinstance(exc, getattr(gui, "FailSafeException", ())):
@@ -4269,12 +4365,11 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
                     EXIT_FAILSAFE,
                 )
             else:
-                code = EXIT_ERROR
-                LAST_PAYLOAD = {
-                    "ok": False, "command": args.command,
-                    "error": f"{type(exc).__name__}: {exc}", "code": code,
-                }
-                raise
+                # Never a bare traceback: the caller still gets one ERROR line (or one JSON
+                # object). AI_DESKTOP_DEBUG=1 adds the traceback on stderr.
+                if os.environ.get("AI_DESKTOP_DEBUG", "").strip().lower() in ("1", "true", "yes", "on"):
+                    traceback.print_exc(file=sys.stderr)
+                code = fail(f"internal error: {type(exc).__name__}: {exc}", EXIT_ERROR)
         return code, LAST_PAYLOAD
     finally:
         if args is not None:

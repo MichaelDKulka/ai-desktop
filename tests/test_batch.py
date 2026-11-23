@@ -178,7 +178,7 @@ def test_run_turns_a_crashing_step_into_a_failure(run, fake_gui, monkeypatch):
 
     fake_gui.press = crash
     code, _, err = run("run", "--steps", '[["key","--key","enter"]]')
-    assert code == 1 and "step 1 (key) failed: ValueError: boom" in err
+    assert code == 1 and "step 1 (key) failed: internal error: ValueError: boom" in err
 
 
 def test_run_reads_steps_from_a_file(run, fake_gui, tmp_path):
@@ -257,7 +257,7 @@ def test_shot_survives_any_capture_failure(run, fake_gui, monkeypatch):
 
 def test_run_reports_an_unbalanced_quote(run, fake_gui):
     code, _, err = run("run", "--steps", json.dumps(["type --text it's done"]))
-    assert code == 2 and "step 1: cannot split" in err and fake_gui.calls == []
+    assert code == 2 and "step 1 (type): cannot split" in err and fake_gui.calls == []
 
 
 def test_run_keeps_unquoted_text_out_of_its_error(run, fake_gui):
@@ -289,5 +289,19 @@ def test_split_step_quotes_alike_on_every_platform(monkeypatch, platform):
     monkeypatch.setattr(ad.sys, "platform", platform)
     assert ad.split_step('type --text="hello world"', 1) == ["type", "--text=hello world"]
     assert ad.split_step("type --text \"it's done\"", 1) == ["type", "--text", "it's done"]
-    with pytest.raises(ad.CliError, match="step 3: cannot split"):
+    with pytest.raises(ad.CliError, match="step 3 \\(type\\): cannot split"):
         ad.split_step("type --text it's done", 3)
+
+
+def test_run_file_that_is_not_utf8_is_an_error(run, fake_gui, tmp_path):
+    steps = tmp_path / "steps.json"
+    steps.write_bytes(b'["key --key enter \xff"]')
+    code, _, err = run("run", "--file", str(steps))
+    assert code == 2 and "not UTF-8" in err
+
+
+def test_unbalanced_quote_error_keeps_the_text_out_of_the_log(run, fake_gui):
+    code, _, err = run("run", "--steps", json.dumps(["type --text it's my secret hunter2"]))
+    assert code == 2 and "step 1 (type): cannot split" in err and "hunter2" not in err
+    log = ad.log_files()[0][0].read_text(encoding="utf-8")
+    assert "hunter2" not in log

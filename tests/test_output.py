@@ -82,10 +82,54 @@ def test_failsafe_exits_3(run, monkeypatch, fake_gui):
     assert code == 3 and data["code"] == 3 and "failsafe" in data["error"]
 
 
-def test_unexpected_exception_propagates(run, monkeypatch):
+def test_unexpected_exception_is_an_error_line(run, monkeypatch):
+    # An escaped traceback broke the contract: no ERROR line, and no JSON with --json.
     monkeypatch.setattr(ad, "cmd_position", raiser(ValueError("x")))
-    with pytest.raises(ValueError):
-        run("position")
+    code, out, err = run("position")
+    assert code == 1 and out == "" and err == "ERROR internal error: ValueError: x\n"
+    code, out, _ = run("--json", "position")
+    data = json.loads(out)
+    assert code == 1 and data["ok"] is False and data["error"] == "internal error: ValueError: x"
+
+
+def test_debug_env_adds_the_traceback(run, monkeypatch):
+    monkeypatch.setattr(ad, "cmd_position", raiser(ValueError("x")))
+    monkeypatch.setenv("AI_DESKTOP_DEBUG", "1")
+    code, _, err = run("position")
+    assert code == 1 and "Traceback" in err and err.rstrip().endswith("ERROR internal error: ValueError: x")
+
+
+def test_a_hung_tool_is_an_error_line(run, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(ad, "cmd_position", raiser(subprocess.TimeoutExpired(["gnome-screenshot", "-f", "x"], 30)))
+    code, out, err = run("position")
+    assert code == 1 and out == ""
+    assert err.startswith("ERROR gnome-screenshot did not finish within 30 s")
+
+
+@pytest.mark.parametrize("argv,field,value", [
+    (["screenshot", "--zoom", "-1420,400"], "zoom", (-1420, 400)),
+    (["type", "--text", "-la"], "text", "-la"),
+    (["paste", "--text", "--force"], "text", "--force"),
+    (["focus", "--title", "-draft"], "title", "-draft"),
+    (["key", "--key", "-"], "key", "-"),
+    (["stop", "--reason", "-x"], "reason", "-x"),
+])
+def test_values_that_begin_with_a_dash(argv, field, value):
+    args, payload = ad.parse_quiet(argv)
+    assert payload is None and getattr(args, field) == value
+
+
+def test_dash_values_through_the_cli(run, fake_gui):
+    code, out, _ = run("type", "--text", "-la", "--instant")
+    assert code == 0 and fake_gui.calls[-1] == ("write", ("-la",), {"interval": 0.02})
+
+
+def test_bad_arguments_are_one_line_when_quiet():
+    _, payload = ad.parse_quiet(["click", "--x", "abc", "--y", "1"])
+    assert payload["code"] == 2 and "\n" not in payload["error"]
+    assert payload["error"] == "bad arguments: argument --x: invalid int value: 'abc' (see: ai-desktop click --help)"
 
 
 def test_json_env_var(run, monkeypatch, sample_png):
