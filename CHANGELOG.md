@@ -1,21 +1,6 @@
 # Changelog
 
-## 0.4.0 (unreleased)
-
-- **`drag`.** `drag --x1 --y1 --x2 --y2 [--duration 0.5] [--button left|right|middle]`
-  presses at the start point, moves to the end over `--duration` seconds and releases
-  (the button is released even if the move fails). Both points are bounds/failsafe
-  checked before anything moves. Works on pyautogui and the Wayland uinput backend, is
-  logged like every command, and is an MCP tool. Like `click`, it glides to the start
-  point along the human-like path (`--instant` jumps), and takes `--seen` (the areas
-  around both points must be unchanged) and `--shot`.
-- **Monitor-relative coordinates.** `click`, `move`, `drag` and `scroll` accept
-  `--monitor N|primary`; x/y are then relative to that monitor's top-left and must lie
-  inside it. Global coordinates stay the default. The MCP `click`, `move`, `drag` and
-  `scroll` tools take an optional `monitor`.
-- **Demo.** `docs/demo.gif` in the README, recorded by `docs/record_demo.py`.
-
-## 0.3.0 (unreleased)
+## 0.5.0 (unreleased)
 
 - **Human-like input.** `click`, `move` and `scroll --x/--y` travel along a random curved
   path (at most 1.5 s) that ends exactly on the target, stays on a monitor and never
@@ -23,23 +8,6 @@
   and 0.25–0.5 s after each word (about 8 s for a 50-character sentence). `--instant` or
   `AI_DESKTOP_HUMAN=0` restores instant input; `--seed`/`AI_DESKTOP_SEED` makes it
   repeatable. On Wayland the last pointer position is kept in `pointer.json`.
-- **Window management.** `windows` lists open windows front-to-back with their global
-  coordinates; `focus --title|--app|--pid|--id` brings one to the front (Win32, macOS via
-  Quartz/AppKit, Linux X11 via libX11 EWMH). Under GNOME Wayland only X11/XWayland
-  windows are visible: GNOME offers no public API for native Wayland windows, and the
-  output says so.
-- **Action log.** Every command appends one JSON line to
-  `~/.ai-desktop/logs/actions-YYYYMMDD.jsonl` (command, arguments, result, exit code,
-  duration, `cli`/`mcp`). Typed, pasted and copied text is reduced to a character count
-  unless `AI_DESKTOP_LOG_TEXT=1`; `AI_DESKTOP_LOG=0` disables the log. `log [--limit N]`
-  shows recent entries; log files follow the screenshot retention rules.
-- **Multi-monitor.** `monitors` lists displays with global coordinates. `screenshot`
-  captures all monitors by default, `--monitor N|primary` one of them; grid labels are
-  global screen coordinates (negative on a monitor left of the primary) and bounds checks
-  accept any point on any monitor. `position` reports the monitor under the pointer.
-- **MCP server.** `ai-desktop mcp` (install with `pip install 'ai-desktop[mcp]'`, Python
-  3.10+) exposes every command as a tool over stdio; the `screenshot` tool returns the saved
-  PNG inline, shrunk to `--max-width` (default 1920) with enlarged labels when needed.
 - **Grid overhaul.** Lines are a magenta core over a dark outline, visible on light, pink,
   dark and busy content, with unlabelled ticks halfway between them. X labels sit at the
   top and bottom, y labels at the left and right, and interior `x,y` landmarks mark some
@@ -87,6 +55,50 @@
   `image_scale` in place of `inline_width`, `inline_height` and `inline_scale`. `click`,
   `move`, `scroll`, `type`, `key`, `hotkey` and `paste` gain `seen` and `shot` (the new
   screenshot comes back inline); new tools `wait` (timeout at most 30 s) and `run`.
+- **`drag` follows the other pointer commands.** It glides to its start point along the
+  human-like path (`--instant` jumps), takes `--seen` (the areas around both points must be
+  unchanged) and `--shot`, and on the uinput backend clamps to the axis range and
+  remembers where the pointer ended.
+- **`run` command strings are split the same way on every OS.** On Windows a quote inside a
+  word (`it's`) used to be an ordinary character and `--text="a b"` became two arguments;
+  now only the backslash escape is off there, so paths keep their backslashes.
+- **Packaging.** The version is written only in `__version__` (`pyproject.toml` reads it, and
+  the release workflow checks the tag against it); `main` carries `.dev0` between releases.
+  The sdist now ships `tests/conftest.py`: without it the store tests ran against the real
+  `~/.ai-desktop`.
+
+## 0.4.0 (2026-10-13)
+
+- **`drag`.** `drag --x1 --y1 --x2 --y2 [--duration 0.5] [--button left|right|middle]`
+  presses at the start point, moves to the end over `--duration` seconds and releases
+  (the button is released even if the move fails). Both points are bounds/failsafe
+  checked before anything moves. Works on pyautogui and the Wayland uinput backend, is
+  logged like every command, and is an MCP tool.
+- **Monitor-relative coordinates.** `click`, `move`, `drag` and `scroll` accept
+  `--monitor N|primary`; x/y are then relative to that monitor's top-left and must lie
+  inside it. Global coordinates stay the default. The MCP `click`, `move`, `drag` and
+  `scroll` tools take an optional `monitor`.
+- **Demo.** `docs/demo.gif` in the README, recorded by `docs/record_demo.py`.
+
+## 0.3.0 (2026-10-13)
+
+- **Window management.** `windows` lists open windows front-to-back with their global
+  coordinates; `focus --title|--app|--pid|--id` brings one to the front (Win32, macOS via
+  Quartz/AppKit, Linux X11 via libX11 EWMH). Under GNOME Wayland only X11/XWayland
+  windows are visible: GNOME offers no public API for native Wayland windows, and the
+  output says so.
+- **Action log.** Every command appends one JSON line to
+  `~/.ai-desktop/logs/actions-YYYYMMDD.jsonl` (command, arguments, result, exit code,
+  duration, `cli`/`mcp`). Typed, pasted and copied text is reduced to a character count
+  unless `AI_DESKTOP_LOG_TEXT=1`; `AI_DESKTOP_LOG=0` disables the log. `log [--limit N]`
+  shows recent entries; log files follow the screenshot retention rules.
+- **Multi-monitor.** `monitors` lists displays with global coordinates. `screenshot`
+  captures all monitors by default, `--monitor N|primary` one of them; grid labels are
+  global screen coordinates (negative on a monitor left of the primary) and bounds checks
+  accept any point on any monitor. `position` reports the monitor under the pointer.
+- **MCP server.** `ai-desktop mcp` (install with `pip install 'ai-desktop[mcp]'`, Python
+  3.10+) exposes every command as a tool over stdio; the `screenshot` tool returns the PNG
+  inline, downscaled to `--max-width` (default 1920) with enlarged labels when needed.
 - `launch-chrome` on Linux goes through the desktop entry (`gtk-launch`/`gio launch`);
   GNOME still opens the window behind the terminal and shows an "is ready" notification.
 - `main()` is a thin wrapper over `execute(argv, quiet=False)`, which returns the result

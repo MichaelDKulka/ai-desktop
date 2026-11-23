@@ -452,13 +452,15 @@ Rule for contributors: nothing may print to stdout except through `status()` / `
 
 ## Releasing
 
-Pushing a tag like `v0.3.0` builds the package and publishes it to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API token is stored anywhere. One-time setup:
+Pushing a tag like `v0.5.0` builds the package and publishes it to PyPI through [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API token is stored anywhere. One-time setup:
 
-1. Create a PyPI account, then under *Your projects → Publishing* add a **pending publisher**: PyPI project `ai-desktop`, owner `MichaelDKulka`, repository `ai-desktop`, workflow `release.yml`, environment `pypi`.
-2. In the GitHub repo, *Settings → Environments*, create an environment named `pypi` (already done).
-3. Bump `version` in `pyproject.toml` and `__version__` in `ai_desktop.py`, update `CHANGELOG.md`, commit, then `git tag v0.3.0 && git push --tags`.
+The trusted publisher on PyPI (project `ai-desktop`, workflow `release.yml`, environment `pypi`) is set up, and 0.3.0 and 0.4.0 were published this way. To release:
 
-After the first release, `pip install ai-desktop` works everywhere.
+1. Set `__version__` in `ai_desktop.py` (the only place the version is written; `pyproject.toml` reads it), e.g. `0.5.0`.
+2. Date its section in `CHANGELOG.md`, commit, and push to `main`.
+3. `git tag v0.5.0 && git push --tags`. The workflow refuses a tag that doesn't match `__version__`.
+
+Between releases `main` carries a `.dev0` version (`0.5.0.dev0`), so a source install never claims to be a published release.
 
 ## License
 

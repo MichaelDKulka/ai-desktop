@@ -16,8 +16,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Check that the tag matches pyproject.toml
-        run: grep -q "^version = \"${GITHUB_REF_NAME#v}\"" pyproject.toml
+      - name: Check that the tag matches __version__ in ai_desktop.py
+        run: grep -q "^__version__ = \"${GITHUB_REF_NAME#v}\"$" ai_desktop.py
       - run: python -m pip install build
       - run: python -m build
       - uses: actions/upload-artifact@v4

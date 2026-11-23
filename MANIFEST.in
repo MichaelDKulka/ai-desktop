@@ -1,0 +1,4 @@
+# The tests need their shared fixtures: without conftest.py they would run against the real
+# ~/.ai-desktop store instead of a temporary one.
+include tests/conftest.py
+include CHANGELOG.md AGENTS.md
