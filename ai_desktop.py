@@ -4795,7 +4795,17 @@ def utf8_console() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     utf8_console()
-    return execute(argv)[0]
+    code = execute(argv)[0]
+    try:
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader closed the pipe early (`ai-desktop windows | head -1`): that's fine,
+        # but Python would print a warning at exit; send the rest of the output nowhere.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except (OSError, ValueError):
+            pass
+    return code
 
 
 if __name__ == "__main__":
