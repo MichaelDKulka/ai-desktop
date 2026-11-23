@@ -961,14 +961,35 @@ def _capture_macos(monitors: list[Monitor], target: Monitor | None, cursor: bool
     return Capture(canvas, left, top, max(scale for _, _, scale, _ in pieces), "all", drawn)
 
 
+# Set inside the background service while the live view runs: a callable(backend, monitor,
+# cursor) returning the newest streamed frame as a Capture, or None to capture as usual.
+FRAME_SOURCE = None
+IN_SERVICE = False  # True in the background service process (ai_desktop_service.serve)
+
+
 def capture_screen(backend: Backend, monitor: str = "all", *, cursor: bool = False) -> Capture:
     """Capture all monitors (or one) at logical size.
 
     Image pixel (px, py) is screen point (x + px, y + py), so grid labels can show the
     coordinates `click` needs even for a monitor left of the primary (negative x).
     `cursor` asks the capture tool to draw the mouse pointer; Capture.cursor says whether
-    it did.
+    it did. With the live view running, the newest streamed frame is used (milliseconds,
+    no screen flash).
     """
+    if FRAME_SOURCE is not None:
+        try:
+            cap = FRAME_SOURCE(backend, monitor, cursor)
+        except CliError:
+            raise
+        except Exception:
+            cap = None
+        if cap is not None:
+            return cap
+    return capture_tool(backend, monitor, cursor=cursor)
+
+
+def capture_tool(backend: Backend, monitor: str = "all", *, cursor: bool = False) -> Capture:
+    """capture_screen without the live view: the platform's capture tool or API."""
     monitors = list_monitors(backend)
     target = resolve_monitor(monitor, monitors)
     if sys.platform == "win32":
@@ -983,7 +1004,7 @@ def capture_screen(backend: Backend, monitor: str = "all", *, cursor: bool = Fal
 # Only files the tool named itself are ever deleted:
 # YYYYmmdd-HHMMSS-mmm[-N][-mM][-zoom][-gridS][.raw].png, where .raw.png is the un-gridded
 # capture kept next to each screenshot for --seen and `wait --changed`.
-STORE_NAME_RE = re.compile(r"^\d{8}-\d{6}-\d{3}(-\d+)?(-m\d+)?(-zoom)?(-grid\d+)?(\.raw)?\.png$")
+STORE_NAME_RE = re.compile(r"^\d{8}-\d{6}-\d{3}(-\d+)?(-m\d+)?(-zoom|-region)?(-grid\d+)?(\.raw)?\.png$")
 RAW_SUFFIX = ".raw.png"
 
 
@@ -1298,7 +1319,7 @@ STOP_MESSAGE = (
 # Commands that still work while stopped: they only look, or they manage the stop itself.
 STOP_EXEMPT = (
     "stop", "resume", "screenshot", "grid", "monitors", "windows", "position", "log",
-    "screenshots", "doctor", "wait", "mcp", "service",
+    "screenshots", "doctor", "wait", "mcp", "service", "live", "observe", "watch",
 )
 
 
@@ -3124,9 +3145,11 @@ def take_screenshot(
     max_width: int | None = None,
     output: str | None = None,
     cap: Capture | None = None,
+    region: tuple[int, int, int, int] | None = None,
 ) -> dict:
     """Capture (or reuse `cap`), zoom, grid, mark the pointer, shrink and save; returns the
-    status fields.
+    status fields. `region` (x, y, width, height in screen coordinates) crops to that area,
+    enlarged `factor` times, like a zoom with exact edges.
 
     Besides the image the agent reads, the un-gridded capture is saved next to it as
     `<name>.raw.png` (the reference for --seen and `wait --changed`); both carry the
@@ -3140,11 +3163,17 @@ def take_screenshot(
     if cap is None:
         cap = capture_screen(backend, monitor, cursor=cursor == "auto")
     monitors = list_monitors(backend)
-    if zoom is not None:
+    capture_rect = (cap.x, cap.y, cap.x + cap.image.width, cap.y + cap.image.height)
+    if region is not None:
+        rx, ry, rw, rh = region
+        box = (max(rx, capture_rect[0]), max(ry, capture_rect[1]), min(rx + rw, capture_rect[2]), min(ry + rh, capture_rect[3]))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            raise CliError(f"--region {rx},{ry},{rw},{rh} is outside the captured area")
+    if zoom is not None or region is not None:
         # Enlarged straight to its final size: never bigger than --max-width (or
         # ZOOM_MAX_EDGE when that is 0), so a big radius x factor can't eat the memory.
-        capture_rect = (cap.x, cap.y, cap.x + cap.image.width, cap.y + cap.image.height)
-        box = zoom_box(zoom, radius, monitors, capture_rect)
+        if zoom is not None:
+            box = zoom_box(zoom, radius, monitors, capture_rect)
         width, height = (box[2] - box[0]) * factor, (box[3] - box[1]) * factor
         fit = min(view_scale(width, limit), ZOOM_MAX_EDGE / max(width, height), 1.0)
         scale = factor * fit
@@ -3160,7 +3189,7 @@ def take_screenshot(
         if resolved is None:
             pad = max(LABEL_PAD, round(LABEL_PAD * k))
             box_w, _ = label_metrics(grid_font(img.size, k), (ox, oy), (img.width / scale, img.height / scale), pad)
-            candidates = ZOOM_SPACINGS if zoom is not None else AUTO_SPACINGS
+            candidates = ZOOM_SPACINGS if zoom is not None or region is not None else AUTO_SPACINGS
             resolved = auto_spacing(max(img.size) / scale, box_w, k, scale, candidates)
         img = draw_grid(img, resolved, (ox, oy), k, pixel_scale=scale)
 
@@ -3176,7 +3205,7 @@ def take_screenshot(
         img = img.resize(size, Image.Resampling.LANCZOS)
     image_scale = round(scale * shrink, 4)
 
-    tag = ("" if cap.monitor == "all" else f"-m{cap.monitor}") + ("" if zoom is None else "-zoom")
+    tag = ("" if cap.monitor == "all" else f"-m{cap.monitor}") + ("-zoom" if zoom is not None else "-region" if region is not None else "")
     target = output or new_screenshot_path(grid, resolved or DEFAULT_SPACING, tag)
     pointer_fields = {
         "pointer": source,
@@ -3187,7 +3216,8 @@ def take_screenshot(
     meta = {
         "version": 1, "x": ox, "y": oy, "width": img.width, "height": img.height,
         "image_scale": image_scale, "spacing": resolved, "monitor": cap.monitor,
-        "zoom": list(zoom) if zoom else None, "cursor": drawn, "raw": raw_name, **pointer_fields,
+        "zoom": list(zoom) if zoom else None, "region": list(region) if region else None,
+        "cursor": drawn, "raw": raw_name, **pointer_fields,
     }
     raw_target = sidecar_path(Path(target).expanduser().resolve())
     if output is not None and raw_target.exists() and (read_image_meta(raw_target) or {}).get("kind") != "raw":
@@ -3219,6 +3249,8 @@ def take_screenshot(
     )
     if zoom is not None:
         fields.update(zoom=f"{zoom[0]},{zoom[1]}", radius=radius, factor=factor)
+    if region is not None:
+        fields.update(region=f"{box[0]},{box[1]},{box[2] - box[0]},{box[3] - box[1]}", factor=factor)
     return fields
 
 
@@ -3522,10 +3554,29 @@ def shot_fields(backend_for, monitor: str, cap: Capture | None = None) -> dict:
     return {"shot": info["path"], "screenshot": info}
 
 
+def live_module():
+    """ai_desktop_live, bound to this module (which may be __main__ when run as a script)."""
+    import ai_desktop_live
+
+    ai_desktop_live.bind(sys.modules[__name__])
+    return ai_desktop_live
+
+
+OBSERVE_PREPARED = None  # the screen just before an action with --observe (set by execute)
+
+
 def finish(args: argparse.Namespace, cmd: str, backend: Backend | None = None, **fields) -> None:
-    """The OK line of an action, plus a fresh screenshot with --shot."""
+    """The OK line of an action, plus what it changed with --observe, or a fresh screenshot
+    with --shot."""
     monitor = getattr(args, "shot", None)
-    if monitor is not None:
+    if getattr(args, "observe", False) and OBSERVE_PREPARED is not None:
+        try:
+            fields.update(live_module().after_action(backend or get_backend(args.backend), OBSERVE_PREPARED))
+        except CliError:
+            raise
+        except Exception as exc:  # the action happened: report, don't fail
+            fields.update(changed="error", observe_error=f"{type(exc).__name__}: {exc}")
+    elif monitor is not None:
         _sleep(shot_settle())
         fields.update(shot_fields(lambda: backend or get_backend(args.backend), monitor))
     status(cmd, **fields)
@@ -3554,11 +3605,14 @@ def changed_region(ref: Reference, cap: Capture, masks: list) -> list[int] | Non
 
 
 def cmd_screenshot(args: argparse.Namespace) -> None:
+    if args.zoom is not None and args.region is not None:
+        raise CliError("give --zoom or --region, not both", code=2)
+    factor = args.factor or (1 if args.region is not None else ZOOM_FACTOR)
     backend = get_backend(args.backend)
     cap = None
     if args.if_changed is not None:
-        if args.zoom is not None:
-            raise CliError("--if-changed compares whole screenshots; leave out --zoom", code=2)
+        if args.zoom is not None or args.region is not None:
+            raise CliError("--if-changed compares whole screenshots; leave out --zoom and --region", code=2)
         try:
             ref = load_reference(args.if_changed)
         except CliError:
@@ -3574,11 +3628,12 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         backend,
         cap=cap,
         monitor=args.monitor,
-        grid=args.grid or args.zoom is not None,
+        grid=args.grid or args.zoom is not None or args.region is not None,
         spacing=args.spacing,
         zoom=args.zoom,
         radius=args.radius,
-        factor=args.factor,
+        factor=factor,
+        region=args.region,
         cursor=args.cursor,
         max_width=args.max_width,
         output=args.output,
@@ -3710,7 +3765,7 @@ def regrid_source(src: Path) -> tuple[Image.Image, tuple[int, int], float]:
         with Image.open(raw) as opened:
             img = opened.convert("RGB")
         origin = (int(raw_meta["x"]), int(raw_meta["y"]))
-        if not own.get("zoom"):
+        if not own.get("zoom") and not own.get("region"):
             return img, origin, 1.0
         scale = float(own["image_scale"])
         box = (
@@ -4304,6 +4359,118 @@ def cmd_resume(args: argparse.Namespace) -> None:
     status("resume", stopped=False, was_stopped=True)
 
 
+def ensure_live(required: bool = False):
+    """The live view of this process: started on demand inside the background service.
+    Elsewhere (or where it can't stream) None, unless `required`."""
+    live = live_module()
+    if not IN_SERVICE:
+        if required:
+            raise CliError("the live view runs in the background service, which could not be started; "
+                           "see ai-desktop service status")
+        return None
+    global FRAME_SOURCE
+    if live.LIVE is None or not live.LIVE.running:
+        try:
+            source = live.choose_source()
+        except CliError:
+            if required:
+                raise
+            return None
+        live.LIVE = live.LiveView(source)
+        live.LIVE.start()
+        FRAME_SOURCE = live.LIVE.frame
+    return live.LIVE
+
+
+def cmd_live(args: argparse.Namespace) -> None:
+    global FRAME_SOURCE
+    live = live_module()
+    if args.action == "stop":
+        if live.LIVE is not None:
+            live.LIVE.stop()
+            live.LIVE = None
+        FRAME_SOURCE = None
+        status("live", running=False)
+        return
+    if args.action == "status":
+        if not IN_SERVICE or live.LIVE is None:
+            status("live", running=False)
+        else:
+            status("live", **live.LIVE.status())
+        return
+    view = ensure_live(required=True)
+    if args.action == "serve":
+        if view.feed is None:
+            view.feed = live.Feed(view, port=args.port)
+        status("live", **view.status(), url=view.feed.url)
+        return
+    status("live", **view.status())
+
+
+def cmd_observe(args: argparse.Namespace) -> None:
+    live = live_module()
+    backend = get_backend(args.backend)
+    view = ensure_live() or live.view_for(backend)
+    base = None
+    if args.since is not None:
+        cap = view.history.get(args.since)
+        if cap is None:
+            raise CliError(f"--since {args.since} is no longer known (only the last {live.HISTORY} frames are kept); "
+                           "observe without --since")
+        base = (args.since, cap)
+    result = live.observe(view, base=base, timeout=min(args.timeout, WAIT_MAX), quiet=args.quiet, min_cells=args.min_cells)
+    if args.no_shot:
+        result.pop("_cap", None)
+    else:
+        result = live.change_shot(backend, result)
+    status("observe", **result)
+
+
+def cmd_watch(args: argparse.Namespace) -> None:
+    """One line per settled change until --limit, --duration, Ctrl+C or the stop switch."""
+    seq = None
+    seen = 0
+    end = None if args.duration is None else _now() + args.duration
+    last_line = 0.0
+    while args.limit is None or seen < args.limit:
+        if end is not None and _now() >= end:
+            break
+        timeout = 30.0 if end is None else max(0.0, min(30.0, end - _now()))
+        argv = ["--json", "observe", "--timeout", str(timeout), "--quiet", str(args.quiet)]
+        argv += ["--min-cells", str(args.min_cells)] + (["--since", str(seq)] if seq is not None else [])
+        argv += ["--no-shot"] if args.no_shot else []
+        payload = observe_via_service(argv)
+        if not payload.get("ok"):
+            raise CliError(payload.get("error") or "observe failed", code=int(payload.get("code") or 1))
+        seq = payload.get("seq", seq)
+        if payload.get("changed") is True:
+            wait = args.gap - (_now() - last_line)
+            if wait > 0:
+                _sleep(wait)  # at most one line per --gap seconds, so a busy screen can't flood
+            fields = {k: v for k, v in payload.items() if k not in ("ok", "command")}
+            status("watch", **fields)
+            last_line = _now()
+            seen += 1
+    status("watch", done=True, changes=seen)
+
+
+def observe_via_service(argv: list[str]) -> dict:
+    """Run an observe in the background service if it's there, else here; its payload."""
+    try:
+        import ai_desktop_service as svc
+
+        result = svc.call(argv) if svc.enabled() else None
+    except Exception:
+        result = None
+    if result is not None and result.get("stdout"):
+        try:
+            return json.loads(result["stdout"].splitlines()[0])
+        except (ValueError, IndexError):
+            pass
+    code, payload = execute(argv, quiet=True)
+    return payload or {"ok": code == 0, "code": code}
+
+
 def cmd_service(args: argparse.Namespace) -> None:
     try:
         import ai_desktop_service as svc
@@ -4414,6 +4581,16 @@ def _point(value: str) -> tuple[int, int]:
     return x, y
 
 
+def _region(value: str) -> tuple[int, int, int, int]:
+    try:
+        x, y, w, h = (int(part) for part in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must look like X,Y,W,H, e.g. 400,300,600,200") from exc
+    if w < 1 or h < 1:
+        raise argparse.ArgumentTypeError("width and height must be at least 1")
+    return x, y, w, h
+
+
 def _bounded_int(low: int, high: int):
     def parse(value: str) -> int:
         number = int(value)
@@ -4505,12 +4682,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="take a gridded screenshot right after acting and print its path as shot= "
         "(optionally of one monitor)",
     )
+    action_flags.add_argument(
+        "--observe",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="after acting, wait (up to 3 s) for the screen to change and settle, and return "
+        "what changed: changed_x/_y/_width/_height and shot= a screenshot of just that area",
+    )
 
     def add(name: str, extra=(), **kwargs) -> argparse.ArgumentParser:
         return sub.add_parser(name, parents=[flags, *extra], **kwargs)
 
     p = add("screenshot", help="capture the screen, optionally with a coordinate grid")
     p.add_argument("--grid", action="store_true", help="overlay labeled grid lines")
+    p.add_argument(
+        "--region", type=_region, metavar="X,Y,W,H",
+        help="only this area (screen coordinates), gridded with screen-coordinate labels; "
+        "--factor enlarges it (default 1)",
+    )
     p.add_argument(
         "--if-changed", nargs="?", const="latest", metavar="SCREENSHOT",
         help="if nothing changed since that screenshot (default: the newest), save nothing and "
@@ -4540,8 +4729,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"--zoom: screen px around the point (default {ZOOM_RADIUS})",
     )
     p.add_argument(
-        "--factor", type=_bounded_int(1, 8), default=ZOOM_FACTOR,
-        help=f"--zoom: enlargement (default {ZOOM_FACTOR})",
+        "--factor", type=_bounded_int(1, 8), default=None,
+        help=f"enlargement for --zoom (default {ZOOM_FACTOR}) or --region (default 1)",
     )
     p.add_argument(
         "--cursor",
@@ -4753,6 +4942,30 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("resume", help="lift a stop; only works from a terminal, so an agent can't lift it")
     p.set_defaults(func=cmd_resume)
 
+    p = add("live", help="the live view: a continuous screen stream in the background service")
+    p.add_argument("action", choices=("start", "stop", "status", "serve"),
+                   help="serve: also publish the screen and a viewer with a Stop button on 127.0.0.1")
+    p.add_argument("--port", type=_bounded_int(0, 65535), default=0, help="serve: port (default: any free one)")
+    p.set_defaults(func=cmd_live)
+
+    p = add("observe", help="wait until the screen changes and settles; report what changed")
+    p.add_argument("--since", type=int, help="compare with this earlier seq (from a previous observe)")
+    p.add_argument("--timeout", type=_non_negative_float, default=10.0, help="seconds to wait for a change (default 10)")
+    p.add_argument("--quiet", type=_non_negative_float, default=0.5, help="seconds without change that count as settled (default 0.5)")
+    p.add_argument("--min-cells", type=_bounded_int(1, 10000), default=3,
+                   help="ignore changes smaller than this many 16 px cells, like a blinking caret (default 3)")
+    p.add_argument("--no-shot", action="store_true", help="report the area only, without a screenshot of it")
+    p.set_defaults(func=cmd_observe)
+
+    p = add("watch", help="print one line per settled change on the screen, until Ctrl+C")
+    p.add_argument("--limit", type=_positive_int, help="stop after this many changes")
+    p.add_argument("--duration", type=_non_negative_float, help="stop after this many seconds")
+    p.add_argument("--quiet", type=_non_negative_float, default=0.5, help="seconds without change that count as settled")
+    p.add_argument("--min-cells", type=_bounded_int(1, 10000), default=3, help="ignore smaller changes (16 px cells)")
+    p.add_argument("--gap", type=_non_negative_float, default=1.0, help="at most one line per this many seconds (default 1)")
+    p.add_argument("--no-shot", action="store_true", help="report areas only, without screenshots")
+    p.set_defaults(func=cmd_watch)
+
     p = add(
         "service",
         help="the background service that keeps the input devices open between commands "
@@ -4783,7 +4996,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Options whose value may begin with a dash: text to type or paste, window titles, a zoom
 # point left of the primary monitor (-1420,400), the minus key. argparse would read such a
 # value as another option, so `--text -la` is joined into the one token `--text=-la`.
-DASH_VALUE_OPTIONS = ("--text", "--zoom", "--title", "--app", "--id", "--url", "--key", "--keys", "--reason", "--profile")
+DASH_VALUE_OPTIONS = ("--text", "--zoom", "--region", "--title", "--app", "--id", "--url", "--key", "--keys", "--reason", "--profile")
 
 
 def join_dash_values(argv: list[str]) -> list[str]:
@@ -4832,8 +5045,9 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
     of a SystemExit; the MCP server runs commands this way. The action log entry is
     written here whatever the outcome.
     """
-    global JSON_OUTPUT, QUIET, CURRENT_COMMAND, LAST_PAYLOAD, HUMAN_INPUT, _MONITOR_CACHE
-    saved = (JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE)
+    global JSON_OUTPUT, QUIET, CURRENT_COMMAND, LAST_PAYLOAD, HUMAN_INPUT, _MONITOR_CACHE, OBSERVE_PREPARED
+    saved = (JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE, OBSERVE_PREPARED)
+    OBSERVE_PREPARED = None
     _MONITOR_CACHE = {}
     started = time.monotonic()
     args = None
@@ -4859,6 +5073,8 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
             if args.command not in STOP_EXEMPT:
                 check_stop()
             seed_rng(args)
+            if getattr(args, "observe", False):
+                OBSERVE_PREPARED = live_module().before_action(get_backend(args.backend))
             args.func(args)
         except CliError as exc:
             code = fail(str(exc), exc.code, **exc.fields)
@@ -4891,7 +5107,7 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
     finally:
         if args is not None:
             log_action(args, code, LAST_PAYLOAD, started)
-        JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE = saved
+        JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE, OBSERVE_PREPARED = saved
 
 
 def utf8_console() -> None:

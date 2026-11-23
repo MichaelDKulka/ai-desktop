@@ -42,8 +42,10 @@ Grid labels are screen coordinates: pass them to click/move unchanged, including
 labels of a zoom="X,Y" close-up, which is the way to hit small targets. On a
 multi-monitor desktop use monitor="N" for a closer look at one screen.
 Pass seen="latest" to an action to have it abort if the screen changed since your last
-screenshot (a dialog, another window in front), and shot=true to get the next
-screenshot back from the same call. Use wait(stable=true) after opening a page or app,
+screenshot (a dialog, another window in front), and observe=true to get back what the
+action changed (its area and a screenshot of just that part) instead of a whole new
+screenshot. observe() waits for the next change; screenshot(if_changed=true) skips an
+unchanged screen. Use wait(stable=true) after opening a page or app,
 and run(...) for a short fixed sequence of steps.
 Actions are paced like a human, and the server runs one at a time: prefer paste over type
 for more than a sentence or two.
@@ -63,9 +65,36 @@ class CommandError(ToolError):
 _CALL = threading.local()
 
 
+def _via_service(argv: list[str], token) -> tuple[int, dict[str, Any]] | None:
+    """Run the command in the background service (shared input devices, the live view);
+    None when it can't, and then it runs here."""
+    try:
+        import ai_desktop_service as svc
+
+        if not svc.enabled() or not svc.should_forward(argv):
+            return None
+        result = svc.call(["--json", *argv], cancel=token, via="mcp")
+    except Exception:
+        return None
+    if result is None:
+        return None
+    lines = (result.get("stdout") or "").splitlines()
+    try:
+        payload = json.loads(lines[0]) if lines else None
+    except ValueError:
+        payload = None
+    if not isinstance(payload, dict):
+        return None if result.get("code") != 130 else (130, {"ok": False, "error": "cancelled by the client", "code": 130})
+    return int(result.get("code", 1)), payload
+
+
 def run_raw(argv: list[str]) -> tuple[int, dict[str, Any]]:
-    """Run one CLI command in-process; returns (exit code, payload) without raising."""
+    """Run one CLI command (in the background service when there is one, else here);
+    returns (exit code, payload) without raising."""
     token = getattr(_CALL, "token", None)
+    forwarded = _via_service(argv, token)
+    if forwarded is not None:
+        return forwarded
     with _LOCK, contextlib.redirect_stdout(sys.stderr):
         if token is not None and token.is_set():  # cancelled while it waited its turn
             return 130, {"ok": False, "command": argv[0] if argv else None,
@@ -128,8 +157,8 @@ def _instant(flag: bool) -> list[str]:
     return ["--instant"] if flag else []
 
 
-def _acting(seen: str | None, shot: bool) -> list[str]:
-    return _opt("--seen", seen) + (["--shot"] if shot else [])
+def _acting(seen: str | None, shot: bool, observe: bool = False) -> list[str]:
+    return _opt("--seen", seen) + (["--shot"] if shot else []) + (["--observe"] if observe else [])
 
 
 # Some clients reject tool results much over 1 MB, and a photo-heavy screen saved as PNG
@@ -225,6 +254,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         instant: bool = False,
         seen: str = "",
         shot: bool = False,
+        observe: bool = False,
     ) -> list:
         """Click at a screen coordinate (button: left, right or middle).
 
@@ -232,9 +262,11 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         straight there. monitor="N" (or "primary") makes x and y relative to that monitor's
         top-left instead of global. seen="latest" (or a screenshot path) aborts without
         clicking if the screen around (x, y) changed since that screenshot; shot=true
-        returns a new screenshot taken right after the click."""
+        returns a new screenshot taken right after the click. observe=true instead waits
+        (up to 3 s) for the screen to settle and returns what changed: its area and a
+        screenshot of just that part, or changed=false. The other actions take observe too."""
         argv = ["click", "--x", str(x), "--y", str(y), "--button", button] + _opt("--monitor", monitor)
-        argv += (["--double"] if double else []) + _instant(instant) + _acting(seen, shot)
+        argv += (["--double"] if double else []) + _instant(instant) + _acting(seen, shot, observe)
         return _with_shot(await _run(argv))
 
     @tool(ACTION)
@@ -245,13 +277,14 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         instant: bool = False,
         seen: str = "",
         shot: bool = False,
+        observe: bool = False,
     ) -> list:
         """Move the mouse to a screen coordinate without clicking.
 
         The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
         straight there. monitor, seen and shot work as for click."""
         argv = ["move", "--x", str(x), "--y", str(y)] + _opt("--monitor", monitor)
-        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot, observe)))
 
     @tool(ACTION)
     async def drag(
@@ -265,6 +298,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         instant: bool = False,
         seen: str = "",
         shot: bool = False,
+        observe: bool = False,
     ) -> list:
         """Press `button` at (x1, y1), move to (x2, y2) over `duration` seconds, release.
         Moves windows, sliders, selections.
@@ -275,11 +309,12 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         click."""
         argv = ["drag", "--x1", str(x1), "--y1", str(y1), "--x2", str(x2), "--y2", str(y2)]
         argv += ["--button", button, "--duration", str(duration)] + _opt("--monitor", monitor)
-        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot, observe)))
 
     @tool(ACTION, name="type")
     async def type_text(
-        text: str, interval: float = 0.02, instant: bool = False, seen: str = "", shot: bool = False
+        text: str, interval: float = 0.02, instant: bool = False, seen: str = "", shot: bool = False,
+        observe: bool = False,
     ) -> list:
         """Type printable ASCII text into the focused window. For other characters use paste.
 
@@ -288,19 +323,19 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         text, or instant=True to type at a fixed `interval`. seen="latest" aborts if the
         screen changed much since that screenshot; shot=true returns a new screenshot."""
         argv = ["type", f"--text={text}", "--interval", str(interval)]
-        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot, observe)))
 
     @tool(ACTION)
-    async def key(key: str, seen: str = "", shot: bool = False) -> list:
+    async def key(key: str, seen: str = "", shot: bool = False, observe: bool = False) -> list:
         """Press one key: enter, tab, esc, space, backspace, delete, arrows, home, end,
         pageup, pagedown, f1-f12, or a single character. seen and shot work as for type."""
-        return _with_shot(await _run(["key", "--key", key] + _acting(seen, shot)))
+        return _with_shot(await _run(["key", "--key", key] + _acting(seen, shot, observe)))
 
     @tool(ACTION)
-    async def hotkey(keys: str, seen: str = "", shot: bool = False) -> list:
+    async def hotkey(keys: str, seen: str = "", shot: bool = False, observe: bool = False) -> list:
         """Press a combination joined with '+', e.g. ctrl+c, cmd+t, alt+tab, ctrl+shift+t.
         seen and shot work as for type."""
-        return _with_shot(await _run(["hotkey", "--keys", keys] + _acting(seen, shot)))
+        return _with_shot(await _run(["hotkey", "--keys", keys] + _acting(seen, shot, observe)))
 
     @tool(ACTION)
     async def scroll(
@@ -312,6 +347,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         instant: bool = False,
         seen: str = "",
         shot: bool = False,
+        observe: bool = False,
     ) -> list:
         """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y).
 
@@ -319,7 +355,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         monitor, seen and shot work as for click."""
         argv = ["scroll", "--direction", direction, "--amount", str(amount)]
         argv += _opt("--x", x) + _opt("--y", y) + _opt("--monitor", monitor)
-        argv += _instant(instant) + _acting(seen, shot)
+        argv += _instant(instant) + _acting(seen, shot, observe)
         return _with_shot(await _run(argv))
 
     @tool(READ_ONLY)
@@ -344,6 +380,17 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         argv += ["--shot"] if shot else []
         return _with_shot(await _run(argv))
 
+    @tool(READ_ONLY)
+    async def observe(timeout: float = 10.0, quiet: float = 0.5, since: int = -1, shot: bool = True) -> list:
+        """Wait until the screen changes and settles (up to `timeout` s, at most 30 here),
+        then return what changed: changed_x/_y/_width/_height in screen coordinates and,
+        with shot=true, a gridded screenshot of just that area. Changes smaller than a
+        blinking caret are ignored. Pass the returned seq as `since` next time to also see
+        changes that happened between calls. changed=false means nothing changed."""
+        argv = ["observe", "--timeout", str(min(max(timeout, 0.0), 30.0)), "--quiet", str(max(quiet, 0.0))]
+        argv += (["--since", str(since)] if since >= 0 else []) + ([] if shot else ["--no-shot"])
+        return _with_shot(await _run(argv))
+
     @tool(ACTION, name="run")
     async def run_steps(steps: list[list[str]], shot: bool = False) -> list:
         """Run several commands in one call, stopping at the first failure. Each step is a
@@ -359,10 +406,10 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         return dumps(await _run(["copy"]))
 
     @tool(ACTION)
-    async def paste(text: str = "", seen: str = "", shot: bool = False) -> list:
+    async def paste(text: str = "", seen: str = "", shot: bool = False, observe: bool = False) -> list:
         """Press the paste shortcut; with `text`, put it on the clipboard first (any
         characters). seen and shot work as for type."""
-        return _with_shot(await _run(["paste"] + _opt("--text", text) + _acting(seen, shot)))
+        return _with_shot(await _run(["paste"] + _opt("--text", text) + _acting(seen, shot, observe)))
 
     @tool(READ_ONLY)
     async def clipboard_get() -> str:

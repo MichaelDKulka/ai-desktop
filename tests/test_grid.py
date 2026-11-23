@@ -380,3 +380,20 @@ def test_regridding_a_grid_output_keeps_screen_coordinates(run, fake_gui, monkey
     with Image.open(first.with_name(f"{first.stem}_grid.png")) as img:
         assert magenta(img.getpixel((45, 137)))  # global -1875, a multiple of 25
         assert img.getpixel((30, 137)) == (255, 255, 255)  # drawn on the raw copy: the 30 grid is gone
+
+
+def test_region_screenshot_is_a_gridded_crop_with_screen_labels(run, fake_gui, monkeypatch):
+    def capture(backend, monitor="all", cursor=False):
+        return ad.Capture(Image.new("RGB", (400, 300), (255, 255, 255)), -1920, 0, 1.0, "1")
+
+    monkeypatch.setattr(ad, "capture_screen", capture)
+    code, out, _ = run("screenshot", "--region", "-1900,50,100,80", "--cursor", "none")
+    assert code == 0 and "region=-1900,50,100,80 factor=1" in out and "width=100 height=80 x=-1900 y=50" in out
+    path = out.split("path=")[1].split()[0]
+    assert "-region-grid" in path and ad.read_image_meta(path)["region"] == [-1900, 50, 100, 80]
+    code, out, _ = run("screenshot", "--region", "-1900,50,100,80", "--factor", "2", "--cursor", "none")
+    assert "width=200 height=160 " in out and "image_scale=2.0" in out
+    code, _, err = run("screenshot", "--region", "500,500,10,10")
+    assert code == 1 and "outside the captured area" in err
+    code, _, err = run("screenshot", "--region", "1,1,5,5", "--zoom", "3,3")
+    assert code == 2 and "not both" in err

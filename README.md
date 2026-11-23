@@ -281,6 +281,37 @@ AI_DESKTOP_SERVICE=off ai-desktop click --x 500 --y 300   # never use it
 
 The commands it runs: click, move, drag, type, key, hotkey, scroll, paste, copy, screenshot, wait and run (not `run --file -`). The rest always run in the calling process; `resume` in particular must see your own terminal. Its log is `~/.ai-desktop/service.log`, and its action log entries carry `via=cli/service`. Windows always runs commands in the calling process.
 
+## Live view
+
+Instead of a new screenshot for every step, the background service can keep a live stream of the screen and tell the agent what changed.
+
+```bash
+ai-desktop live start                       # GNOME Wayland: Mutter's screen cast, no dialog
+ai-desktop click --x 520 --y 340 --observe  # ... changed=True changed_x=480 changed_y=330 changed_width=260 changed_height=310 shot=<crop of just that>
+ai-desktop observe --timeout 10             # waits until something changes and settles
+ai-desktop watch                            # one line per settled change, until Ctrl+C
+ai-desktop live serve                       # url=http://127.0.0.1:PORT/?token=...  (viewer with a Stop button)
+ai-desktop live stop
+```
+
+- **Faster everything.** With the live view on, `screenshot`, `--seen`, `--shot` and `wait` read the newest frame: about 0.2 s instead of about 1 s per screenshot on GNOME, and no screen flash. GNOME shows its screen-sharing indicator while the stream runs; it pauses after 5 idle minutes and resumes on its own. Stopping the sharing from GNOME's indicator is respected until the next `live start`.
+- **`--observe`** on `click`, `move`, `drag`, `type`, `key`, `hotkey`, `scroll` and `paste` waits up to 3 s for the screen to change and settle after acting, then returns the changed area (`changed_x`, `changed_y`, `changed_width`, `changed_height`) and `shot=`, a gridded screenshot of just that area with some context (the whole screen when more than a third changed), or `changed=False`. One call per step instead of act, wait, screenshot.
+- **`observe`** waits for the next change and settles, the same way; it returns a `seq`, and `observe --since SEQ` also counts changes made between two calls. Changes smaller than three 16-px cells, such as a blinking caret, are ignored (`--min-cells`). **`watch`** prints one line per settled change (at most one per `--gap` seconds), for a script or an agent's background task.
+- `observe` and `--observe` start the live view by themselves where it can run. Without the background service they poll ordinary screenshots instead, which works everywhere but is slow on GNOME (each capture takes about 1 s).
+- Where it streams: GNOME on Wayland (it needs the system's `python3-gi`, `gir1.2-gstreamer-1.0` and `gstreamer1.0-pipewire`, which Ubuntu installs with the desktop). On X11 it polls Pillow's capture (no flash); on Windows and macOS it polls the usual capture (experimental). Other Wayland desktops: not yet.
+
+**The local feed** (`live serve`) listens on 127.0.0.1 only, and every request needs the token in its URL (or `Authorization: Bearer TOKEN`); requests from another web site or through another host name are refused. Endpoints: `/` the viewer (the screen live, recent changes and actions, and a **Stop** button that does exactly what `ai-desktop stop` does), `/frame.jpg?max_width=1024&grid=1`, `/stream.mjpg`, `/events` (Server-Sent Events: `change`, `action`, `stopped`) and `/status`. It performs no actions besides Stop. A local vision model can watch the screen through it:
+
+```python
+import base64, json, urllib.request
+FEED = "http://127.0.0.1:PORT"; TOKEN = "..."            # from: ai-desktop live serve
+jpeg = urllib.request.urlopen(f"{FEED}/frame.jpg?token={TOKEN}&max_width=1024").read()
+req = {"model": "qwen2.5vl:3b", "stream": False, "messages": [{"role": "user", "content": "What is on the screen?",
+       "images": [base64.b64encode(jpeg).decode()]}]}
+answer = urllib.request.urlopen("http://127.0.0.1:11434/api/chat", json.dumps(req).encode()).read()
+print(json.loads(answer)["message"]["content"])
+```
+
 ## Agent loop
 
 ```bash

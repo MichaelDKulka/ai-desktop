@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.0 (unreleased)
+
+- **Live view.** `ai-desktop live start` keeps a stream of the screen in the background
+  service: on GNOME Wayland a Mutter screen cast (no dialog; GNOME's sharing indicator
+  shows) through `ai_desktop_helper.py`, run by the system Python for its GStreamer; on
+  X11 polled Pillow captures; Windows and macOS polled captures (experimental).
+  Screenshots, `--seen`, `--shot` and `wait` then read the newest frame: about 0.2 s
+  instead of about 1 s on GNOME, without the flash. It pauses after 5 idle minutes and
+  resumes by itself.
+- **`--observe`** on every action: after acting, wait for the screen to change and settle
+  and return the changed area plus a gridded screenshot of just that part, or
+  `changed=False`. **`observe [--since SEQ]`** waits for the next change; **`watch`**
+  prints one line per settled change. Caret-sized changes are ignored.
+- **`screenshot --region X,Y,W,H [--factor N]`**: a gridded crop with screen-coordinate
+  labels.
+- **Local feed.** `ai-desktop live serve` publishes the screen on 127.0.0.1 (token needed;
+  Host and Origin checked): a viewer page with the screen, recent changes and actions and
+  a Stop button, `/frame.jpg`, `/stream.mjpg` and Server-Sent `/events`, for local vision
+  models.
+- **MCP:** new `observe` tool, `observe=true` on the action tools, and the MCP server hands
+  its commands to the background service when there is one (shared devices, live frames;
+  logged as `mcp/service`).
+
 ## 0.6.0 (unreleased)
 
 - **Background service.** The first action or screenshot starts a per-user background

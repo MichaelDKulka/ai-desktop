@@ -40,7 +40,10 @@ import ai_desktop
 
 # Commands the service runs; the rest gain nothing from it (or must see the client's own
 # terminal and environment: resume, mcp, launch-chrome, doctor).
-FORWARDED = ("click", "move", "drag", "type", "key", "hotkey", "scroll", "paste", "copy", "screenshot", "wait", "run")
+FORWARDED = ("click", "move", "drag", "type", "key", "hotkey", "scroll", "paste", "copy", "screenshot", "wait", "run",
+             "live", "observe")
+# These need the service (the live view lives in it), so the client starts one and waits.
+NEEDS_SERVICE = ("live",)
 DEFAULT_IDLE = 1800  # seconds without a request before the service exits
 RESPAWN_GAP = 60  # seconds between attempts to start a service that didn't come up
 CONNECT_TIMEOUT = 0.5  # seconds to wait for the service to answer the handshake
@@ -184,8 +187,12 @@ def try_forward(argv: list[str] | None) -> int | None:
         return None
     sock = _connect()
     if sock is None:
-        spawn()  # ready for the next command; this one runs here
-        return None
+        if argv_command(argv) in NEEDS_SERVICE:
+            sock = start_and_connect()
+        else:
+            spawn()  # ready for the next command; this one runs here
+        if sock is None:
+            return None
     buffer = bytearray()
     try:
         with sock:
@@ -212,6 +219,58 @@ def try_forward(argv: list[str] | None) -> int | None:
     sys.stderr.write(result.get("stderr", ""))
     sys.stderr.flush()
     return int(result["code"])
+
+
+def argv_command(argv: list[str]) -> str | None:
+    args, _ = ai_desktop.parse_quiet(argv)
+    return None if args is None else args.command
+
+
+def start_and_connect(wait: float = 5.0) -> socket.socket | None:
+    with contextlib.suppress(OSError):
+        (runtime_dir() / "spawned").unlink()  # needed now: ignore the respawn gap
+    if not spawn():
+        return None
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        sock = _connect()
+        if sock is not None:
+            return sock
+        time.sleep(0.05)
+    return None
+
+
+def call(argv: list[str], cancel=None, via: str = "cli") -> dict | None:
+    """Run a command in the service and return {"code", "stdout", "stderr"} instead of
+    printing; None if there is no usable service. `cancel` (a threading.Event) closes the
+    connection when set, which stops the command at its next pause."""
+    if not enabled():
+        return None
+    sock = _connect()
+    if sock is None:
+        spawn()
+        return None
+    buffer = bytearray()
+    try:
+        with sock:
+            _send(sock, {"op": "hello", "build": build_id(), "session": session_key()})
+            answer = _recv(sock, buffer)
+            if not answer or not answer.get("ok"):
+                if answer and answer.get("reason") == "build":
+                    with contextlib.suppress(OSError):
+                        stop()
+                return None
+            settings = {**client_settings(), "AI_DESKTOP_VIA": via}
+            _send(sock, {"op": "run", "argv": list(argv), "cwd": os.getcwd(), "settings": settings})
+            sock.settimeout(0.2)
+            while True:
+                try:
+                    return _recv(sock, buffer)
+                except socket.timeout:
+                    if cancel is not None and cancel.is_set():
+                        return {"code": 130, "stdout": "", "stderr": "ERROR cancelled by the client\n"}
+    except (OSError, ValueError):
+        return None
 
 
 def request(op: str) -> dict | None:
@@ -266,7 +325,7 @@ class Service:
         try:
             with ai_desktop.keep_devices():
                 while self.running:
-                    if time.monotonic() - self.last_request > self.idle:
+                    if time.monotonic() - self.last_request > self.idle and not self._feed_open():
                         break
                     try:
                         conn, _ = listener.accept()
@@ -282,6 +341,11 @@ class Service:
             with contextlib.suppress(OSError):
                 if self.path.stat().st_ino == own_inode:  # not a newer service's socket
                     self.path.unlink()
+
+    @staticmethod
+    def _feed_open() -> bool:
+        live = sys.modules.get("ai_desktop_live")
+        return bool(live and live.LIVE is not None and live.LIVE.feed is not None)
 
     def _peer_ok(self, conn: socket.socket) -> bool:
         if not hasattr(socket, "SO_PEERCRED"):
@@ -362,6 +426,7 @@ def execute_like_cli(argv: list[str], cwd: str, settings: dict, token) -> dict:
             os.environ.pop(key, None)
         os.environ.update({k: str(v) for k, v in settings.items() if k.startswith("AI_DESKTOP_")})
         os.environ.pop("AI_DESKTOP_SERVICE", None)
+        ai_desktop.LOG_VIA = f"{os.environ.pop('AI_DESKTOP_VIA', None) or 'cli'}/service"
         os.chdir(cwd)
         ai_desktop.CANCEL = token
         with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -391,6 +456,7 @@ def serve() -> None:
     except ValueError:
         idle = DEFAULT_IDLE
     ai_desktop.LOG_VIA = "cli/service"
+    ai_desktop.IN_SERVICE = True
     Service(_private_runtime_dir() / "service.sock", idle).serve()
 
 

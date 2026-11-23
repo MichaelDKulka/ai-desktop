@@ -18,6 +18,9 @@ and rules as the commands below.
    call; its path is printed as `shot=`.
 4. Look at that new screenshot and confirm the action worked before doing the next one.
 
+- Want to see what an action did? Add `--observe`: it waits for the screen to settle and returns
+  `changed_x/_y/_width/_height` and `shot=`, a screenshot of just what changed (or
+  `changed=False`). `ai-desktop observe` waits for the next change on its own.
 - Opened a page or an app? `ai-desktop wait --changed latest --settle --shot` waits until the
   screen changes and then stops changing, then takes the screenshot.
 - Lost the path? `ai-desktop screenshots latest`.

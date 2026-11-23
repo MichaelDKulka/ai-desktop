@@ -328,3 +328,35 @@ def test_screenshot_if_changed_returns_no_image_when_unchanged(monkeypatch, tmp_
     result = asyncio.run(mcp.call_tool("screenshot", {"if_changed": True}))
     assert "--if-changed" in calls[0]
     assert len(result.content) == 1 and json.loads(result.content[0].text)["unchanged"] is True
+
+
+def test_observe_tool_and_observe_on_actions(monkeypatch):
+    import ai_desktop_mcp as server
+
+    calls = []
+    monkeypatch.setattr(server, "run", lambda argv: calls.append(argv) or {"ok": True, "changed": False})
+    mcp = server.build_server()
+
+    async def work():
+        await mcp.call_tool("observe", {"timeout": 99, "since": 4, "shot": False})
+        await mcp.call_tool("click", {"x": 1, "y": 2, "observe": True})
+        await mcp.call_tool("key", {"key": "enter", "observe": True})
+
+    asyncio.run(work())
+    assert calls[0] == ["observe", "--timeout", "30.0", "--quiet", "0.5", "--since", "4", "--no-shot"]
+    assert calls[1][-1] == "--observe" and calls[2][-1] == "--observe"
+
+
+def test_mcp_uses_the_background_service_when_it_can(monkeypatch):
+    import ai_desktop_mcp as server
+    import ai_desktop_service as svc
+
+    monkeypatch.setattr(svc, "enabled", lambda: True)
+    sent = []
+    monkeypatch.setattr(svc, "call", lambda argv, cancel=None, via="cli": sent.append((argv, via)) or {
+        "code": 0, "stdout": json.dumps({"ok": True, "command": "click", "x": 1}) + "\n", "stderr": ""})
+    code, payload = server.run_raw(["click", "--x", "1", "--y", "2"])
+    assert code == 0 and payload["x"] == 1 and sent == [(["--json", "click", "--x", "1", "--y", "2"], "mcp")]
+    monkeypatch.setattr(svc, "call", lambda argv, cancel=None, via="cli": None)  # no service: run here
+    monkeypatch.setattr(ad, "execute", lambda argv, quiet=False: (0, {"ok": True, "command": "click", "here": True}))
+    assert server.run_raw(["click", "--x", "1", "--y", "2"])[1]["here"] is True
