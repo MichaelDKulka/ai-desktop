@@ -190,6 +190,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         max_width: int | None = None,
         zoom: str = "",
         cursor: str = "auto",
+        if_changed: bool = False,
     ) -> list:
         """Capture the screen (all monitors by default) with a labelled coordinate grid.
 
@@ -200,12 +201,18 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         targets; its labels are still screen coordinates. Images wider than max_width
         (default 1920) are shrunk with their labels kept legible; image_scale says by how
         much. cursor="marker" always draws a crosshair at the pointer, "none" never.
+        if_changed=true: when nothing changed since your last screenshot, returns only
+        {"unchanged": true, "path": <that screenshot>} and no image, so you don't pay for
+        the same picture twice.
         """
         limit = default_max_width if max_width is None else max_width
         argv = ["screenshot", "--monitor", str(monitor)] + _opt("--max-width", limit)
         argv += (["--grid"] if grid else []) + _opt("--spacing", spacing) + _opt("--zoom", zoom)
         argv += [] if cursor == "auto" else ["--cursor", cursor]
+        argv += ["--if-changed"] if if_changed else []
         payload = await _run(argv)
+        if payload.get("unchanged"):
+            return [dumps(payload)]
         return _with_image(payload, payload["path"])
 
     @tool(ACTION)

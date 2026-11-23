@@ -305,3 +305,27 @@ def test_the_input_device_is_ready_before_the_guard_looks(run, fake_gui, desk, m
     order.clear()
     assert run("--backend", "uinput", "key", "--key", "enter", "--seen", path)[0] == 0
     assert order.index(("device", "ai-desktop keyboard")) < order.index(("capture",))
+
+
+def test_screenshot_if_changed_reuses_an_unchanged_screenshot(run, fake_gui, desk):
+    first = shoot(run)
+    count = len(ad.store_files())
+    code, out, _ = run("screenshot", "--grid", "--if-changed")
+    assert code == 0 and "unchanged=True" in out and f"path={first}" in out
+    assert len(ad.store_files()) == count  # nothing new saved
+    paint(desk, 700, 400, 712, 412)  # a ticked checkbox: small, but a change
+    code, out, _ = run("screenshot", "--grid", "--if-changed", first)
+    assert code == 0 and "unchanged=False" in out and f"path={first}" not in out
+    assert "changed_x=700 changed_y=400 changed_width=12 changed_height=12" in out
+    assert len(ad.store_files()) == count + 1
+
+
+def test_if_changed_without_a_screenshot_takes_one(run, fake_gui, desk):
+    code, out, _ = run("screenshot", "--if-changed")
+    assert code == 0 and "unchanged=False" in out and len(ad.store_files()) == 1
+
+
+def test_if_changed_and_zoom_do_not_mix(run, fake_gui, desk):
+    shoot(run)
+    code, _, err = run("screenshot", "--zoom", "500,300", "--if-changed")
+    assert code == 2 and "--if-changed" in err

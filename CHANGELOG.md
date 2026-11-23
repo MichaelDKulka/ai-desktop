@@ -12,6 +12,11 @@
   code, the command runs by itself, and old code is replaced. `ai-desktop service
   status|start|stop`; `AI_DESKTOP_SERVICE=off`; it exits after `AI_DESKTOP_SERVICE_IDLE`
   seconds (default 1800) without a request. Linux and macOS only.
+- **`screenshot --if-changed [SCREENSHOT]`** compares with that screenshot (default: the
+  newest) pixel by pixel. Unchanged: nothing is saved and the line says `unchanged=True`
+  with that screenshot's path; the MCP tool (`if_changed=true`) then returns no image.
+  Changed: a new screenshot as usual, plus `changed_x/_y/_width/_height` around everything
+  that changed.
 - Fonts for grid labels are loaded once per size instead of for every screenshot.
 
 ## 0.5.0 (unreleased)

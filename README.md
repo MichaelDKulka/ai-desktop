@@ -42,7 +42,7 @@ Then finish the one-time steps for your platform under [Platform notes](#platfor
 ## Commands
 
 ```text
-ai-desktop screenshot [--grid] [--spacing auto|N] [--monitor all|primary|N] [--cursor auto|marker|none]
+ai-desktop screenshot [--grid] [--spacing auto|N] [--monitor all|primary|N] [--cursor auto|marker|none] [--if-changed [PATH]]
                       [--zoom X,Y [--radius 200] [--factor 3]] [--max-width 1920] [-o screenshot.png]
 ai-desktop grid --input image.png [-o gridded.png] [--spacing auto|N] [--max-width 1920]
 ai-desktop click --x 500 --y 300 [--button left|right|middle] [--double] [--monitor N] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
@@ -139,6 +139,8 @@ ai-desktop screenshots clean --all    # empty the store (and the logs)
 ```
 
 Why not the system temp folder: macOS purges `/tmp` files unused for three days and Linux usually clears it on reboot, so 30-day retention would be meaningless there.
+
+**`--if-changed [SCREENSHOT]`** (default: the newest) compares the screen with that screenshot pixel by pixel first. If nothing changed, nothing is saved and the line says `unchanged=True path=<that screenshot>`, so an agent needn't read the same picture again (the MCP `screenshot` tool with `if_changed=true` then returns no image at all). If something changed, a new screenshot is taken as usual and `changed_x`, `changed_y`, `changed_width`, `changed_height` frame everything that changed, for a closer look with `--zoom`. It is exact on purpose, so a blinking caret or a ticking clock counts as a change.
 
 ## Monitors
 

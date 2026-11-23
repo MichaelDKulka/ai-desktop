@@ -26,6 +26,8 @@ and rules as the commands below.
   draws finer lines over the whole screen.)
 - More than one monitor? The default image shows all of them; `--monitor 1` (an index
   from `ai-desktop monitors`) zooms into one.
+- Looking again? `ai-desktop screenshot --grid --if-changed` says `unchanged=True` instead of
+  making a new picture when nothing changed, and otherwise names the area that did.
 - Want a fixed path? `ai-desktop screenshot --grid -o /tmp/screen.png`.
 - Not sure what is open? `ai-desktop windows`, then `ai-desktop focus --title "part of title"`
   before acting in that window. Take a screenshot afterwards to confirm it is in front.

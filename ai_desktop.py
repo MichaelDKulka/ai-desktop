@@ -3534,10 +3534,45 @@ def finish(args: argparse.Namespace, cmd: str, backend: Backend | None = None, *
 # --- Commands ----------------------------------------------------------------------------
 
 
+def changed_region(ref: Reference, cap: Capture, masks: list) -> list[int] | None:
+    """[x, y, width, height] in screen coordinates around every pixel of `cap` that differs
+    from the reference by more than PIXEL_TOLERANCE (outside `masks`), or None when nothing
+    does. Pixel-exact on purpose: a ticked checkbox must count. A different layout counts
+    as the whole capture."""
+    if cap.image.size != ref.image.size or (cap.x, cap.y) != (ref.x, ref.y) or cap.monitor != ref.monitor:
+        return [cap.x, cap.y, cap.image.width, cap.image.height]
+    diff = ImageChops.difference(ref.image, cap.image.convert("RGB"))
+    changed = ImageChops.lighter(ImageChops.lighter(*diff.split()[:2]), diff.split()[2])
+    changed = changed.point(lambda v: 255 if v > PIXEL_TOLERANCE else 0)
+    for rect in masks:
+        ImageDraw.Draw(changed).rectangle(rect, fill=0)
+    box = changed.getbbox()
+    if box is None:
+        return None
+    left, top, right, bottom = box
+    return [ref.x + left, ref.y + top, right - left, bottom - top]
+
+
 def cmd_screenshot(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
+    cap = None
+    if args.if_changed is not None:
+        if args.zoom is not None:
+            raise CliError("--if-changed compares whole screenshots; leave out --zoom", code=2)
+        try:
+            ref = load_reference(args.if_changed)
+        except CliError:
+            ref = None  # nothing to compare with: take one
+        cap = capture_screen(backend, args.monitor, cursor=args.cursor == "auto")
+        region = None
+        if ref is not None:
+            region = changed_region(ref, cap, ref.masks(known_pointer(backend, list_monitors(backend))[0]))
+            if region is None:
+                status("screenshot", unchanged=True, path=ref.path, x=ref.x, y=ref.y, monitor=ref.monitor)
+                return
     fields = take_screenshot(
         backend,
+        cap=cap,
         monitor=args.monitor,
         grid=args.grid or args.zoom is not None,
         spacing=args.spacing,
@@ -3548,6 +3583,10 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         max_width=args.max_width,
         output=args.output,
     )
+    if args.if_changed is not None:
+        fields = {"unchanged": False, **fields}
+        if region is not None:  # where, so an agent can look closer at just that part
+            fields.update(changed_x=region[0], changed_y=region[1], changed_width=region[2], changed_height=region[3])
     status("screenshot", **fields)
 
 
@@ -4472,6 +4511,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("screenshot", help="capture the screen, optionally with a coordinate grid")
     p.add_argument("--grid", action="store_true", help="overlay labeled grid lines")
+    p.add_argument(
+        "--if-changed", nargs="?", const="latest", metavar="SCREENSHOT",
+        help="if nothing changed since that screenshot (default: the newest), save nothing and "
+        "print unchanged=True with its path",
+    )
     p.add_argument(
         "--spacing",
         type=_spacing,

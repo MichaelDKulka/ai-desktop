@@ -317,3 +317,14 @@ def test_big_inline_images_are_sent_as_jpeg_under_the_budget(tmp_path):
     Image.new("RGB", (100, 100), (9, 9, 9)).save(small)
     image, info = server._inline(str(small))
     assert info == {} and image.data == small.read_bytes()
+
+
+def test_screenshot_if_changed_returns_no_image_when_unchanged(monkeypatch, tmp_path):
+    import ai_desktop_mcp as server
+
+    calls = []
+    monkeypatch.setattr(server, "run", lambda argv: calls.append(argv) or {"ok": True, "command": "screenshot", "unchanged": True, "path": "/x.png"})
+    mcp = server.build_server()
+    result = asyncio.run(mcp.call_tool("screenshot", {"if_changed": True}))
+    assert "--if-changed" in calls[0]
+    assert len(result.content) == 1 and json.loads(result.content[0].text)["unchanged"] is True
