@@ -276,3 +276,20 @@ def test_find_desktop_entry(tmp_path, monkeypatch):
         "com.google.Chrome", str(apps / "com.google.Chrome.desktop")
     )
     assert ad.find_desktop_entry(("nothing",)) is None
+
+
+def test_macos_focus_checks_the_window_came_to_the_front(monkeypatch):
+    app = types.SimpleNamespace(activateWithOptions_=lambda opts: True)
+    appkit = types.SimpleNamespace(
+        NSRunningApplication=types.SimpleNamespace(runningApplicationWithProcessIdentifier_=lambda pid: app),
+        NSApplicationActivateIgnoringOtherApps=2,
+    )
+    monkeypatch.setitem(sys.modules, "AppKit", appkit)
+    monkeypatch.setattr(ad.subprocess, "run", lambda *a, **k: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(ad.time, "sleep", lambda s: None)
+    target = ad.Win("7", 42, "Chrome", "Inbox", 0, 0, 800, 600, False, False)
+    other = ad.Win("8", 42, "Chrome", "Docs", 0, 0, 800, 600, True, False)
+    monkeypatch.setattr(ad, "_windows_macos", lambda: [other, target])
+    assert ad._activate_macos(target)["activated"] is False  # the app came forward, another window of it
+    monkeypatch.setattr(ad, "_windows_macos", lambda: [target._replace(active=True), other])
+    assert ad._activate_macos(target)["activated"] is True

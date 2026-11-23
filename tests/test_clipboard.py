@@ -113,3 +113,14 @@ def test_clipboard_timeout_is_an_error_line(run, linux, monkeypatch):
     monkeypatch.setattr(ad.subprocess, "run", hang)
     code, out, err = run("clipboard", "get")
     assert code == 1 and out == "" and err.startswith("ERROR xclip did not finish within 15 s")
+
+
+def test_windows_powershell_is_started_by_its_full_path(monkeypatch, tmp_path):
+    # Windows searches the current folder before System32 for a bare "powershell".
+    monkeypatch.setattr(ad.sys, "platform", "win32")
+    system = tmp_path / "System32" / "WindowsPowerShell" / "v1.0"
+    system.mkdir(parents=True)
+    (system / "powershell.exe").write_bytes(b"")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    set_argv, get_argv = ad._clipboard_tools()
+    assert set_argv[0] == get_argv[0] == str(system / "powershell.exe")

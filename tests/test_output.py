@@ -1,3 +1,4 @@
+import sys
 import json
 
 import pytest
@@ -156,3 +157,33 @@ def test_backend_flag_before_or_after_subcommand(run, monkeypatch):
     monkeypatch.setenv("AI_DESKTOP_BACKEND", "uinput")
     run("position")
     assert seen["backend"] == "uinput"
+
+
+@pytest.mark.parametrize("value,shown", [
+    ("plain", "plain"),
+    ("two words", '"two words"'),
+    ('say "hi"', '"say \\"hi\\""'),
+    ("line one\nline two", '"line one\\nline two"'),
+    ("a=b", '"a=b"'),
+    ("", '""'),
+    ("Café • ünïcode", '"Café • ünïcode"'),
+    (r"C:\Users\me\shot.png", r"C:\Users\me\shot.png"),
+    (r"C:\Program Files\x.png", r'"C:\Program Files\x.png"'),
+    ("bell\x07", '"bell\\x07"'),
+])
+def test_format_fields_keeps_each_value_on_the_line(value, shown):
+    assert ad.format_fields({"k": value}) == f"k={shown}"
+
+
+def test_text_output_survives_a_narrow_console_encoding(run, fake_gui, monkeypatch):
+    # A Windows pipe is cp1252 before Python 3.15: printing a title with "•" raised
+    # UnicodeEncodeError after the action had run.
+    import io
+
+    raw = io.BytesIO()
+    narrow = io.TextIOWrapper(raw, encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", narrow)
+    monkeypatch.setattr(ad, "cmd_position", lambda args: ad.status("position", title="Inbox • Gmail ✓"))
+    assert ad.main(["position"]) == 0
+    narrow.flush()
+    assert "Inbox • Gmail ✓".encode("utf-8") in raw.getvalue()

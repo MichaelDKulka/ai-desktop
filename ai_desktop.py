@@ -114,15 +114,23 @@ class CliError(Exception):
         self.fields = fields
 
 
+_FIELD_ESCAPES = {'"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
 def format_fields(fields: dict) -> str:
-    """`key=value` pairs on one line; values with spaces are quoted, lists/dicts skipped."""
+    """`key=value` pairs on one line; lists/dicts are skipped. A value that is empty or has
+    whitespace, a quote, `=` or a control character is quoted, with quotes and control
+    characters escaped, so a newline or quote in it (a tool's error, a window title) can't
+    break the line. Backslashes stay as they are: Windows paths must remain usable."""
     parts = []
     for key, value in fields.items():
         if isinstance(value, (list, dict)):
             continue
         text = str(value)
-        if not text or any(c.isspace() for c in text):
-            text = f'"{text}"'
+        if not text or any(c.isspace() or c in '"=' or ord(c) < 32 for c in text):
+            text = '"' + "".join(
+                _FIELD_ESCAPES.get(c, c if ord(c) >= 32 else f"\\x{ord(c):02x}") for c in text
+            ) + '"'
         parts.append(f"{key}={text}")
     return " ".join(parts)
 
@@ -2566,6 +2574,16 @@ def _activate_macos(win: Win) -> dict:
             result["raised"] = done.returncode == 0
         except (OSError, subprocess.SubprocessError):
             result["raised"] = False
+    # activateWithOptions_ only says the request was accepted, and with several windows
+    # the app may come forward with another one in front: check what is really in front.
+    time.sleep(0.3)
+    try:
+        front = _windows_macos()
+    except Exception:
+        front = []
+    if front:
+        top = front[0]
+        result["activated"] = bool(result["activated"]) and top.pid == win.pid and (not win.title or top.title == win.title)
     return result
 
 
@@ -2627,7 +2645,11 @@ def activate_window(win: Win) -> dict:
 
 # --- Clipboard ---------------------------------------------------------------------------
 
-_PS = ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
+def _powershell() -> list[str]:
+    """PowerShell by its full path: Windows searches the current folder before System32
+    for a bare name, so a powershell.exe in the agent's working folder would run instead."""
+    exe = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    return [exe if os.path.isfile(exe) else "powershell", "-NoProfile", "-NonInteractive", "-Command"]
 
 
 def _clipboard_tools() -> tuple[list[str], list[str]]:
@@ -2635,11 +2657,12 @@ def _clipboard_tools() -> tuple[list[str], list[str]]:
     if sys.platform == "darwin":
         return ["pbcopy"], ["pbpaste"]
     if sys.platform == "win32":
+        ps = _powershell()
         return (
-            _PS + ["[Console]::InputEncoding = [Text.Encoding]::UTF8; "
-                   "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
-            _PS + ["[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
-                   "$c = Get-Clipboard -Raw; if ($c) { [Console]::Out.Write($c) }"],
+            ps + ["[Console]::InputEncoding = [Text.Encoding]::UTF8; "
+                  "Set-Clipboard -Value ([Console]::In.ReadToEnd())"],
+            ps + ["[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
+                  "$c = Get-Clipboard -Raw; if ($c) { [Console]::Out.Write($c) }"],
         )
     x_tools = [
         (["xclip", "-selection", "clipboard", "-in"], ["xclip", "-selection", "clipboard", "-out"]),
@@ -4716,7 +4739,21 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
         JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE = saved
 
 
+def utf8_console() -> None:
+    """Print UTF-8 whatever the console's encoding (a Windows pipe is cp1252 before
+    Python 3.15), so a window title or copied text can't crash the output after the
+    action has run."""
+    for stream in (sys.stdout, sys.stderr):
+        encoding = (getattr(stream, "encoding", None) or "").lower().replace("-", "")
+        if encoding != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    utf8_console()
     return execute(argv)[0]
 
 

@@ -97,6 +97,16 @@
   The screen must now be unchanged for `--quiet` seconds (default 1). New
   `wait --changed SCREENSHOT --settle` waits for a change and then for quiet; the MCP
   `wait` tool has `settle` and `quiet`.
+- **Output can't break.** Text output is UTF-8 whatever the console's encoding, so a
+  window title or copied text with `•`, `✓` or CJK no longer crashes on a Windows pipe
+  (cp1252) after the action ran. A `key=value` value with a quote, `=` or a newline is
+  quoted with those escaped, so it stays on its line; backslashes in Windows paths are
+  kept as they are.
+- **Windows: PowerShell by its full path.** Windows looks in the current folder before
+  System32 for a bare `powershell`, so a `powershell.exe` in the agent's working folder
+  ran on every clipboard call.
+- **macOS: `focus` checks the window is in front.** It reported success when the app
+  accepted the request, even with another of its windows in front.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's
