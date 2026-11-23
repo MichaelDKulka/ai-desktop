@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.9.0 (unreleased)
+## 0.5.0 (2026-11-23)
 
 - **Local vision model.** `locate "the gear icon"`, `describe [--region]` and
   `observe/watch --describe` use a vision model on this machine (Ollama by default, or an
@@ -8,9 +8,6 @@
   the model's own grid size and uses its native grounding prompt, checks a close-up with
   a yes/no question before trusting the answer, and remembers what it found while the
   pixels there are unchanged. `click --target` falls back to it. MCP: `locate`, `describe`.
-
-## 0.8.0 (unreleased)
-
 - **Find things by name.** `ui` lists the active window's buttons, links and fields from
   the accessibility tree (AT-SPI on Linux) with references like `e12`; `click --ref`,
   `--name`, `--mark` (with `screenshot --marks`), `set-text` and `read` act on them. Stale
@@ -22,9 +19,6 @@
   says which one found it (`found_by=`).
 - MCP: `ui`, `text`, `read`, `set_text`; `click` takes `target`, `ref`, `name`, `text`,
   `mark`; `screenshot` takes `marks`; `launch_chrome` takes `a11y`.
-
-## 0.7.0 (unreleased)
-
 - **Live view.** `ai-desktop live start` keeps a stream of the screen in the background
   service: on GNOME Wayland a Mutter screen cast (no dialog; GNOME's sharing indicator
   shows) through `ai_desktop_helper.py`, run by the system Python for its GStreamer; on
@@ -45,9 +39,6 @@
 - **MCP:** new `observe` tool, `observe=true` on the action tools, and the MCP server hands
   its commands to the background service when there is one (shared devices, live frames;
   logged as `mcp/service`).
-
-## 0.6.0 (unreleased)
-
 - **Background service.** The first action or screenshot starts a per-user background
   process (`ai_desktop_service.py`), and later commands hand their work to it over a Unix
   socket in a folder only you can open (Linux also checks the caller's uid). It keeps the
@@ -64,9 +55,6 @@
   Changed: a new screenshot as usual, plus `changed_x/_y/_width/_height` around everything
   that changed.
 - Fonts for grid labels are loaded once per size instead of for every screenshot.
-
-## 0.5.0 (unreleased)
-
 - **Stop switch.** `ai-desktop stop [--reason TEXT]` halts ai-desktop on every platform,
   Wayland included: every action refuses to start, and a running one aborts at its next
   pause (glide step, typed character, drag step, scroll notch), all with exit code 3.
