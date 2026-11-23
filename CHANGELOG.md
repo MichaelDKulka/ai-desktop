@@ -42,6 +42,23 @@
   argparse's whole usage block; it is now the reason plus `(see: ai-desktop click --help)`.
   A `run` step with an unbalanced quote no longer copies the step's text, which is often
   typed text, into the error and the action log. A `--file` that isn't UTF-8 is exit 2.
+- **`--seen` checks closer to the action.** The check used to run before the virtual
+  input device was created (0.5 s on Wayland) and before a glide of up to 1.5 s, so the
+  screen could change after it. With `--seen` the device is opened first and the glide
+  takes at most 0.4 s.
+- **Straight drags on Wayland.** Each pointer position went out as two input frames (the
+  new x with the old y, then the new y), so drags were staircases; x and y now arrive
+  together.
+- **`copy` never loses the clipboard.** It parks a marker on the clipboard to tell a fresh
+  copy from stale text, but restored the user's text only when nothing was copied: a
+  failing key press left `ai-desktop-copy-...` behind. Now it is restored whatever goes
+  wrong, and the keyboard is opened before the clipboard is touched at all.
+- **Clipboard tool per desktop.** On KDE and wlroots Wayland sessions `wl-copy` and
+  `wl-paste` now come before `xclip`, whose clipboard those compositors share only while an
+  X11 window has focus; GNOME keeps `xclip` first. wl-clipboard is asked for plain text, so
+  an image on the clipboard no longer comes back as bytes.
+- **The monitor layout is detected once per command** instead of up to eight times (each
+  an `xrandr` run on Linux).
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

@@ -1,3 +1,4 @@
+import sys
 import math
 import random
 
@@ -131,6 +132,7 @@ def test_seed_makes_a_command_repeat(run, fake_gui, monkeypatch):
 
 class FakeDev:
     events: list = []
+    syncs: list = []  # parallel to events: whether a SYN_REPORT followed that event
     created = 0
     closed = 0
 
@@ -138,8 +140,9 @@ class FakeDev:
         self.name = name
         FakeDev.created += 1
 
-    def emit(self, ev_type, code, value):
+    def emit(self, ev_type, code, value, sync=True):
         FakeDev.events.append((ev_type, code, value))
+        FakeDev.syncs.append(sync)
 
     def close(self):
         FakeDev.closed += 1
@@ -154,6 +157,7 @@ class FakeDev:
 @pytest.fixture
 def uinput(monkeypatch):
     FakeDev.events = []
+    FakeDev.syncs = []
     FakeDev.created = FakeDev.closed = 0
     monkeypatch.setattr(ad, "_UInputDevice", FakeDev)
     monkeypatch.setattr(ad.time, "sleep", lambda s: None)
@@ -316,3 +320,54 @@ def test_pointer_memory_survives_garbage(tmp_path):
     ad.home_dir().mkdir(parents=True, exist_ok=True)
     (ad.home_dir() / ad.POINTER_FILE).write_text("not json", encoding="utf-8")
     assert ad.recall_pointer() is None
+
+
+def test_uinput_moves_are_one_frame_each(uinput):
+    # X and Y must reach the compositor together: with a SYN_REPORT after each, every
+    # step was two motions (new x with the old y, then the new y), and drags a staircase.
+    uinput.drag(200, 200, 700, 700, "left", 0.2)
+    pairs = 0
+    for i, (ev_type, code, _) in enumerate(FakeDev.events):
+        if ev_type == ad.EV_ABS and code == ad.ABS_X and i + 1 < len(FakeDev.events) and FakeDev.events[i + 1][1] == ad.ABS_Y:
+            assert FakeDev.syncs[i] is False and FakeDev.syncs[i + 1] is True
+            pairs += 1
+    assert pairs > 5
+    held = abs_points(FakeDev.events[FakeDev.events.index((ad.EV_KEY, ad.BTN_LEFT, 1)):])
+    assert all(abs(x - y) <= 1 for x, y in held)  # on the diagonal, not a staircase
+
+
+def test_real_uinput_device_setup_and_events(monkeypatch):
+    """The real _UInputDevice, with the kernel calls recorded instead of made."""
+    import types as _types
+
+    calls = []
+    fake_fcntl = _types.ModuleType("fcntl")
+    fake_fcntl.ioctl = lambda fd, request, arg=0: calls.append(("ioctl", request, arg))
+    monkeypatch.setitem(sys.modules, "fcntl", fake_fcntl)
+    monkeypatch.setattr(ad.os, "open", lambda path, flags: calls.append(("open", path)) or 99)
+    monkeypatch.setattr(ad.os, "write", lambda fd, data: calls.append(("write", data)) or len(data))
+    monkeypatch.setattr(ad.os, "close", lambda fd: calls.append(("close", fd)))
+    monkeypatch.setattr(ad.time, "sleep", lambda s: None)
+    dev = ad._UInputDevice("test", keys=(ad.BTN_LEFT,), rel=(ad.REL_WHEEL,), abs_axes=((ad.ABS_X, 1919), (ad.ABS_Y, 1079)))
+    requests = [c[1] for c in calls if c[0] == "ioctl"]
+    assert calls[0] == ("open", "/dev/uinput")
+    # The size bits of each _IOW request must match the struct sent with it.
+    setup = next(c[2] for c in calls if c[0] == "ioctl" and c[1] == ad.UI_DEV_SETUP)
+    absinfo = [c[2] for c in calls if c[0] == "ioctl" and c[1] == ad.UI_ABS_SETUP]
+    assert (ad.UI_DEV_SETUP >> 16) & 0x3FFF == len(setup) == 92
+    assert all((ad.UI_ABS_SETUP >> 16) & 0x3FFF == len(a) == 28 for a in absinfo) and len(absinfo) == 2
+    assert requests.index(ad.UI_DEV_SETUP) > max(i for i, r in enumerate(requests) if r == ad.UI_ABS_SETUP)
+    assert requests[-1] == ad.UI_DEV_CREATE
+    calls.clear()
+    dev.emit(ad.EV_ABS, ad.ABS_X, 5, sync=False)
+    dev.emit(ad.EV_ABS, ad.ABS_Y, 7)
+    first, second = [c[1] for c in calls if c[0] == "write"]
+    size = ad.INPUT_EVENT.size
+    assert len(first) == size and len(second) == 2 * size
+    assert ad.INPUT_EVENT.unpack(first)[2:] == (ad.EV_ABS, ad.ABS_X, 5)
+    assert ad.INPUT_EVENT.unpack(second[size:])[2:] == (ad.EV_SYN, ad.SYN_REPORT, 0)
+    calls.clear()
+    dev.close()
+    assert calls == [("ioctl", ad.UI_DEV_DESTROY, 0), ("close", 99)]
+    dev.close()  # closing twice is harmless
+    assert len(calls) == 2

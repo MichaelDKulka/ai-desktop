@@ -118,7 +118,7 @@ class FakeDev:
         self.events = []
         self.last_abs = None
 
-    def emit(self, ev_type, code, value):
+    def emit(self, ev_type, code, value, sync=True):
         self.events.append((ev_type, code, value))
 
     def close(self):

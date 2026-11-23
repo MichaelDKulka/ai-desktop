@@ -259,3 +259,49 @@ def test_changed_blocks_finds_each_region():
     x, y, w, h = blocks[0]
     assert 84 <= x <= 100 and 84 <= y <= 100 and 400 <= w <= 432 and 200 <= h <= 232
     assert ad.changed_blocks(a, a.copy()) == []
+
+
+def test_a_guarded_glide_is_short(run, fake_gui, desk, sleeps):
+    path = shoot(run)
+    sleeps.clear()
+    assert run("click", "--x", "1500", "--y", "900")[0] == 0
+    unguarded = sum(sleeps)
+    sleeps.clear()
+    assert run("click", "--x", "1500", "--y", "900", "--seen", path)[0] == 0
+    guarded = sum(sleeps) - ad.SHOT_SETTLE * 0  # no --shot here
+    assert unguarded > 0.6 and guarded <= ad.GUARDED_GLIDE_MAX * 1.5
+
+
+def test_the_input_device_is_ready_before_the_guard_looks(run, fake_gui, desk, monkeypatch):
+    order = []
+
+    class Dev:
+        def __init__(self, name, **kwargs):
+            order.append(("device", name))
+            self.last_abs = (0, 0)
+
+        def emit(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+    capture = ad.capture_screen
+    monkeypatch.setattr(ad, "capture_screen", lambda *a, **k: order.append(("capture",)) or capture(*a, **k))
+    monkeypatch.setattr(ad, "_UInputDevice", Dev)
+    monkeypatch.setattr(ad.time, "sleep", lambda s: None)
+    monkeypatch.setenv("AI_DESKTOP_SCREEN_SIZE", "1920x1080")
+    monkeypatch.setattr(ad.sys, "platform", "linux")
+    path = shoot(run)
+    order.clear()
+    assert run("--backend", "uinput", "click", "--x", "500", "--y", "300", "--seen", path)[0] == 0
+    assert order.index(("device", "ai-desktop pointer")) < order.index(("capture",))
+    order.clear()
+    assert run("--backend", "uinput", "key", "--key", "enter", "--seen", path)[0] == 0
+    assert order.index(("device", "ai-desktop keyboard")) < order.index(("capture",))

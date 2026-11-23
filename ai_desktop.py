@@ -745,8 +745,17 @@ def detect_monitors(backend: Backend) -> tuple[list[Monitor], str]:
     return found, source
 
 
+# The layout can't change within one command, and detecting it runs xrandr on Linux, so
+# execute() keeps it here for the length of each command (None: no command running).
+_MONITOR_CACHE: dict | None = None
+
+
 def list_monitors(backend: Backend) -> list[Monitor]:
-    return order_monitors(detect_monitors(backend)[0])
+    if _MONITOR_CACHE is None:
+        return order_monitors(detect_monitors(backend)[0])
+    if backend.name not in _MONITOR_CACHE:
+        _MONITOR_CACHE[backend.name] = order_monitors(detect_monitors(backend)[0])
+    return list(_MONITOR_CACHE[backend.name])
 
 
 def monitor_at(monitors: list[Monitor], x: int, y: int) -> Monitor | None:
@@ -1290,8 +1299,10 @@ def human_path(
     monitors: list[Monitor],
     size: tuple[int, int],
     rng: random.Random,
+    max_duration: float | None = None,
 ) -> list[tuple[int, int, float]]:
-    """Waypoints (x, y, pause before) along a random curve from start towards end.
+    """Waypoints (x, y, pause before) along a random curve from start towards end, taking
+    at most `max_duration` seconds when given.
 
     The end point itself is not included: the caller's final exact move lands there.
     The curve is a cubic Bezier with randomly offset control points, walked slow-fast-slow,
@@ -1302,7 +1313,10 @@ def human_path(
     dist = math.hypot(dx, dy)
     if dist < 2:
         return []
-    duration = _clamp(dist / rng.uniform(*HUMAN_MOVE_SPEED), *HUMAN_MOVE_DURATION)
+    low, high = HUMAN_MOVE_DURATION
+    if max_duration is not None:
+        low, high = min(low, max_duration), min(high, max_duration)
+    duration = _clamp(dist / rng.uniform(*HUMAN_MOVE_SPEED), low, high)
     steps = int(_clamp(round(dist / HUMAN_STEP_PX), *HUMAN_STEPS))
     nx, ny = -dy / dist, dx / dist  # unit normal to the straight line
     controls = []
@@ -1426,6 +1440,10 @@ def load_pyautogui():
 
 class Backend:
     name = ""
+    glide_max: float | None = None  # seconds; set for guarded actions (see guarded())
+
+    def prepare(self, kind: str) -> None:
+        """Get the input device for `kind` ("pointer" or "keyboard") ready ahead of time."""
 
     def size(self) -> tuple[int, int]:
         raise NotImplementedError
@@ -1452,7 +1470,7 @@ class Backend:
         start = start or self.position()
         if start is None:
             start = synthetic_start((x, y), monitor_at(monitors, x, y) or monitors[0], RNG)
-        return human_path(start, (x, y), monitors, self.size(), RNG)
+        return human_path(start, (x, y), monitors, self.size(), RNG, self.glide_max)
 
 
 class PyAutoGuiBackend(Backend):
@@ -1817,9 +1835,13 @@ class _UInputDevice:
         time.sleep(float(os.environ.get("AI_DESKTOP_UINPUT_DELAY", "0.5")))
         self.last_abs = (0, 0)  # the axes start at 0
 
-    def emit(self, ev_type: int, code: int, value: int) -> None:
-        os.write(self.fd, INPUT_EVENT.pack(0, 0, ev_type, code, value))
-        os.write(self.fd, INPUT_EVENT.pack(0, 0, EV_SYN, SYN_REPORT, 0))
+    def emit(self, ev_type: int, code: int, value: int, sync: bool = True) -> None:
+        """Write one event; `sync` ends the frame (SYN_REPORT). Events that belong together,
+        such as the X and Y of one pointer position, go in one frame."""
+        data = INPUT_EVENT.pack(0, 0, ev_type, code, value)
+        if sync:
+            data += INPUT_EVENT.pack(0, 0, EV_SYN, SYN_REPORT, 0)
+        os.write(self.fd, data)
 
     def close(self) -> None:
         if self.fd is None:
@@ -1968,6 +1990,13 @@ class UInputBackend(Backend):
         codes = set(UINPUT_KEYS.values()) | {code for code, _ in US_CHARMAP.values()}
         return self._device(("keyboard",), lambda: _UInputDevice("ai-desktop keyboard", keys=sorted(codes)))
 
+    def prepare(self, kind: str) -> None:
+        # Inside keep_devices() this creates the cached device now, so the compositor's
+        # start-up delay is paid before a --seen check rather than between it and the action.
+        if _DEVICE_CACHE is not None:
+            with self._pointer() if kind == "pointer" else self._keyboard():
+                pass
+
     def _emit_abs(self, dev: _UInputDevice, x: int, y: int) -> None:
         # Stay inside the axis range _pointer() declared, even if xrandr disagrees with size().
         width, height = self.size()
@@ -1978,7 +2007,7 @@ class UInputBackend(Backend):
             # a move to where it last was would be lost (say the human moved the mouse
             # since): step 1 px away first.
             dev.emit(EV_ABS, ABS_X, x + 1 if x < width - 1 else x - 1)
-        dev.emit(EV_ABS, ABS_X, x)
+        dev.emit(EV_ABS, ABS_X, x, sync=False)  # one frame: the compositor sees (x, y) at once
         dev.emit(EV_ABS, ABS_Y, y)
         if last is not None:
             dev.last_abs = (x, y)
@@ -2446,16 +2475,20 @@ def _clipboard_tools() -> tuple[list[str], list[str]]:
             _PS + ["[Console]::OutputEncoding = [Text.Encoding]::UTF8; "
                    "$c = Get-Clipboard -Raw; if ($c) { [Console]::Out.Write($c) }"],
         )
-    # X tools come first: under Wayland they go through Xwayland, whose clipboard the
-    # compositor shares with native apps, and unlike wl-copy they never steal focus.
-    candidates = []
-    if os.environ.get("DISPLAY"):
-        candidates += [
-            (["xclip", "-selection", "clipboard", "-in"], ["xclip", "-selection", "clipboard", "-out"]),
-            (["xsel", "--clipboard", "--input"], ["xsel", "--clipboard", "--output"]),
-        ]
-    if os.environ.get("WAYLAND_DISPLAY"):
-        candidates.append((["wl-copy"], ["wl-paste", "--no-newline"]))
+    x_tools = [
+        (["xclip", "-selection", "clipboard", "-in"], ["xclip", "-selection", "clipboard", "-out"]),
+        (["xsel", "--clipboard", "--input"], ["xsel", "--clipboard", "--output"]),
+    ] if os.environ.get("DISPLAY") else []
+    # Plain text only: without a type wl-paste returns whatever is offered first (an
+    # image's bytes), and wl-copy guesses a type from the content.
+    wl_tools = [
+        (["wl-copy", "--type", "text/plain"], ["wl-paste", "--no-newline", "--type", "text"])
+    ] if os.environ.get("WAYLAND_DISPLAY") else []
+    # On GNOME the X tools come first: Xwayland's clipboard is always shared with native
+    # apps there, and unlike wl-copy they never steal focus. KDE and wlroots compositors
+    # share it only while an X11 window has focus, so wl-clipboard goes first there.
+    gnome = "gnome" in os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
+    candidates = x_tools + wl_tools if gnome or not wl_tools else wl_tools + x_tools
     for set_argv, get_argv in candidates:
         if shutil.which(set_argv[0]):
             return set_argv, get_argv
@@ -3106,6 +3139,23 @@ def fingerprint_diff(a: list[int | None], b: list[int | None], tolerance: int = 
     return sum(1 for p, q in pairs if abs(p - q) > tolerance) / len(pairs)
 
 
+GUARDED_GLIDE_MAX = 0.4  # seconds: a guarded glide stays short, so the check stays fresh
+
+
+@contextlib.contextmanager
+def guarded(args: argparse.Namespace, backend: Backend, kind: str):
+    """Wrap a --seen check and the action it protects. The input device is opened first and
+    the glide shortened, so little time passes between the check and the action (on
+    Wayland a new device alone takes AI_DESKTOP_UINPUT_DELAY, 0.5 s)."""
+    if getattr(args, "seen", None) is None:
+        yield
+        return
+    backend.glide_max = GUARDED_GLIDE_MAX
+    with keep_devices():
+        backend.prepare(kind)
+        yield
+
+
 def guard_seen(args: argparse.Namespace, backend: Backend, *points: tuple[int, int] | None) -> dict:
     """With --seen, abort before acting if the screen no longer looks like the screenshot
     the agent read: around each of `points` for coordinate commands (both ends of a drag),
@@ -3448,9 +3498,10 @@ def cmd_click(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     x, y = to_global(backend, args.monitor, args.x, args.y)
     backend.check_point(x, y)
-    seen = guard_seen(args, backend, (x, y))
     clicks = 2 if args.double else 1
-    backend.click(x, y, args.button, clicks)
+    with guarded(args, backend, "pointer"):
+        seen = guard_seen(args, backend, (x, y))
+        backend.click(x, y, args.button, clicks)
     finish(
         args, "click", backend, x=x, y=y, button=args.button, clicks=clicks,
         **_monitor_fields(args), **seen,
@@ -3461,8 +3512,9 @@ def cmd_move(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     x, y = to_global(backend, args.monitor, args.x, args.y)
     backend.check_point(x, y)
-    seen = guard_seen(args, backend, (x, y))
-    backend.move(x, y)
+    with guarded(args, backend, "pointer"):
+        seen = guard_seen(args, backend, (x, y))
+        backend.move(x, y)
     finish(args, "move", backend, x=x, y=y, **_monitor_fields(args), **seen)
 
 
@@ -3472,8 +3524,9 @@ def cmd_drag(args: argparse.Namespace) -> None:
     x2, y2 = to_global(backend, args.monitor, args.x2, args.y2)
     backend.check_point(x1, y1)
     backend.check_point(x2, y2)
-    seen = guard_seen(args, backend, (x1, y1), (x2, y2))
-    backend.drag(x1, y1, x2, y2, args.button, args.duration)
+    with guarded(args, backend, "pointer"):
+        seen = guard_seen(args, backend, (x1, y1), (x2, y2))
+        backend.drag(x1, y1, x2, y2, args.button, args.duration)
     finish(
         args, "drag", backend, x1=x1, y1=y1, x2=x2, y2=y2, button=args.button,
         duration=args.duration, **_monitor_fields(args), **seen,
@@ -3485,16 +3538,18 @@ def cmd_type(args: argparse.Namespace) -> None:
     if bad:
         raise CliError("cannot type these characters (ASCII only): " + " ".join(map(repr, bad)))
     backend = get_backend(args.backend)
-    seen = guard_seen(args, backend)
-    backend.type_text(args.text, args.interval)
+    with guarded(args, backend, "keyboard"):
+        seen = guard_seen(args, backend)
+        backend.type_text(args.text, args.interval)
     finish(args, "type", backend, chars=len(args.text), **seen)
 
 
 def cmd_key(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     key = backend.resolve_key(args.key)
-    seen = guard_seen(args, backend)
-    backend.press(key)
+    with guarded(args, backend, "keyboard"):
+        seen = guard_seen(args, backend)
+        backend.press(key)
     finish(args, "key", backend, key=args.key, **seen)
 
 
@@ -3510,8 +3565,9 @@ def cmd_hotkey(args: argparse.Namespace) -> None:
         names = [n.lower() if len(n) == 1 else n for n in names]
     backend = get_backend(args.backend)
     keys = [backend.resolve_key(n) for n in names]
-    seen = guard_seen(args, backend)
-    backend.hotkey(keys)
+    with guarded(args, backend, "keyboard"):
+        seen = guard_seen(args, backend)
+        backend.hotkey(keys)
     finish(args, "hotkey", backend, keys=args.keys, **seen)
 
 
@@ -3525,9 +3581,10 @@ def cmd_scroll(args: argparse.Namespace) -> None:
     if x is not None:
         x, y = to_global(backend, args.monitor, x, y)
         backend.check_point(x, y)
-    seen = guard_seen(args, backend, (x, y) if x is not None else None)
     notches = args.amount if args.direction == "up" else -args.amount
-    backend.scroll(notches, x, y)
+    with guarded(args, backend, "pointer"):
+        seen = guard_seen(args, backend, (x, y) if x is not None else None)
+        backend.scroll(notches, x, y)
     finish(
         args,
         "scroll",
@@ -3541,22 +3598,38 @@ def cmd_scroll(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_copy(args: argparse.Namespace) -> None:
-    backend = get_backend(args.backend)
-    keys = _shortcut(backend, "c")
-    # Park a sentinel on the clipboard so stale contents can't pass for a fresh copy.
+def _copy_with_sentinel(backend: Backend, keys: list) -> tuple[str, str]:
+    """Press copy and return (clipboard text, sentinel). A sentinel is parked on the
+    clipboard first so stale contents can't pass for a fresh copy; whatever goes wrong,
+    the user's previous clipboard text comes back unless something new was copied."""
     previous = get_clipboard()
     sentinel = f"ai-desktop-copy-{uuid.uuid4().hex}"
     set_clipboard(sentinel)
-    time.sleep(0.2)
-    backend.hotkey(keys)
     text = sentinel
-    deadline = time.monotonic() + 2
-    while text == sentinel and time.monotonic() < deadline:
-        time.sleep(0.1)
-        text = get_clipboard()
+    try:
+        time.sleep(0.2)
+        backend.hotkey(keys)
+        deadline = time.monotonic() + 2
+        while text == sentinel and time.monotonic() < deadline:
+            time.sleep(0.1)
+            text = get_clipboard()
+    finally:
+        if text == sentinel:
+            try:
+                set_clipboard(previous)
+            except Exception:
+                pass  # the original error matters more
+    return text, sentinel
+
+
+def cmd_copy(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    keys = _shortcut(backend, "c")
+    with keep_devices():
+        # The keyboard first: if it can't be opened, the clipboard hasn't been touched.
+        backend.prepare("keyboard")
+        text, sentinel = _copy_with_sentinel(backend, keys)
     if text == sentinel:
-        set_clipboard(previous)
         raise CliError(
             "nothing was copied; select something first (terminals copy with ctrl+shift+c: "
             "use hotkey, then clipboard get)"
@@ -3567,11 +3640,12 @@ def cmd_copy(args: argparse.Namespace) -> None:
 def cmd_paste(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     keys = _shortcut(backend, "v")
-    seen = guard_seen(args, backend)
-    if args.text is not None:
-        set_clipboard(args.text)
-        time.sleep(0.2)  # let the compositor pick up the new clipboard owner
-    backend.hotkey(keys)
+    with guarded(args, backend, "keyboard"):
+        seen = guard_seen(args, backend)
+        if args.text is not None:
+            set_clipboard(args.text)
+            time.sleep(0.2)  # let the compositor pick up the new clipboard owner
+        backend.hotkey(keys)
     finish(args, "paste", backend, chars=len(args.text) if args.text is not None else "clipboard", **seen)
 
 
@@ -4316,8 +4390,9 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
     of a SystemExit; the MCP server runs commands this way. The action log entry is
     written here whatever the outcome.
     """
-    global JSON_OUTPUT, QUIET, CURRENT_COMMAND, LAST_PAYLOAD, HUMAN_INPUT
-    saved = (JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT)
+    global JSON_OUTPUT, QUIET, CURRENT_COMMAND, LAST_PAYLOAD, HUMAN_INPUT, _MONITOR_CACHE
+    saved = (JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE)
+    _MONITOR_CACHE = {}
     started = time.monotonic()
     args = None
     code = 0
@@ -4374,7 +4449,7 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
     finally:
         if args is not None:
             log_action(args, code, LAST_PAYLOAD, started)
-        JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT = saved
+        JSON_OUTPUT, QUIET, CURRENT_COMMAND, HUMAN_INPUT, _MONITOR_CACHE = saved
 
 
 def main(argv: list[str] | None = None) -> int:

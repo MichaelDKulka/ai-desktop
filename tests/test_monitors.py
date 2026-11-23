@@ -224,3 +224,17 @@ def test_primary_is_the_star_not_the_plus():
     assert [(m.name, m.primary) for m in found] == [("HDMI-1", False), ("eDP-1", True)]
     ordered = ad.order_monitors(found)
     assert ordered[0].name == "eDP-1" and ordered[0].primary and not ordered[1].primary
+
+
+def test_monitor_layout_is_detected_once_per_command(run, fake_gui, monkeypatch):
+    calls = []
+    monkeypatch.setattr(ad, "detect_monitors", lambda backend: calls.append(1) or ([ad.Monitor(0, "m", 0, 0, 1920, 1080, True, 1.0)], "fake"))
+    code, _, _ = run("drag", "--x1", "10", "--y1", "20", "--x2", "900", "--y2", "500", "--monitor", "0")
+    assert code == 0 and len(calls) == 1
+    calls.clear()
+    code, _, _ = run("run", "--steps", '[["move","--x","5","--y","5","--monitor","0"],["move","--x","9","--y","9"]]')
+    assert code == 0 and len(calls) == 2  # once per step: each step is its own command
+    calls.clear()
+    ad.list_monitors(ad.get_backend("pyautogui"))
+    ad.list_monitors(ad.get_backend("pyautogui"))
+    assert len(calls) == 2  # outside a command nothing is cached
