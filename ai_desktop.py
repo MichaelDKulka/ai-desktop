@@ -40,7 +40,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageGrab, PngImagePlugin
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 DEFAULT_SPACING = 100
 MIN_SPACING = 10
@@ -716,6 +716,29 @@ def resolve_monitor(spec: str, monitors: list[Monitor]) -> Monitor | None:
     raise CliError(f"no monitor {index}; run: ai-desktop monitors")
 
 
+def to_global(backend: "Backend", monitor: str | None, x: int, y: int) -> tuple[int, int]:
+    """Map (x, y) relative to `monitor`'s top-left to global coordinates.
+
+    With no monitor the point is already global and is returned unchanged.
+    """
+    if monitor is None:
+        return x, y
+    target = resolve_monitor(monitor, list_monitors(backend))
+    if target is None:
+        raise CliError("--monitor all has no origin; give primary or an index")
+    if not (0 <= x < target.width and 0 <= y < target.height):
+        raise CliError(
+            f"({x}, {y}) is outside monitor {target.index} ({target.width}x{target.height}); "
+            "with --monitor, x and y are relative to that monitor's top-left"
+        )
+    return target.x + x, target.y + y
+
+
+def _monitor_fields(args: argparse.Namespace) -> dict:
+    monitor = getattr(args, "monitor", None)
+    return {} if monitor is None else {"monitor": monitor}
+
+
 class Capture(NamedTuple):
     image: Image.Image
     x: int  # global coordinates of the image's top-left pixel
@@ -1371,6 +1394,17 @@ class PyAutoGuiBackend(Backend):
         self._glide(x, y)
         self.gui.click(x=x, y=y, button=button, clicks=clicks, interval=0.1)
 
+    def drag(self, x1: int, y1: int, x2: int, y2: int, button: str, duration: float) -> None:
+        # Glide to the start like click; the move with the button held is a straight line
+        # over `duration` (a curve would change what a selection or a drawing covers).
+        self._glide(x1, y1)
+        self.gui.moveTo(x1, y1)
+        self.gui.mouseDown(button=button)
+        try:
+            self.gui.moveTo(x2, y2, duration=duration)
+        finally:
+            self.gui.mouseUp(button=button)
+
     def type_text(self, text: str, interval: float) -> None:
         if not HUMAN_INPUT:
             self.gui.write(text, interval=interval)
@@ -1866,6 +1900,25 @@ class UInputBackend(Backend):
                 time.sleep(0.02)
                 dev.emit(EV_KEY, code, 0)
         remember_pointer(x, y)
+
+    def drag(self, x1: int, y1: int, x2: int, y2: int, button: str, duration: float) -> None:
+        code = MOUSE_BUTTONS[button]
+        steps = max(2, int(duration / 0.02))
+        with self._pointer() as dev:
+            self._glide(dev, x1, y1)
+            self._move_to(dev, x1, y1)
+            dev.emit(EV_KEY, code, 1)
+            try:
+                last = (x1, y1)
+                for i in range(1, steps + 1):
+                    point = (round(x1 + (x2 - x1) * i / steps), round(y1 + (y2 - y1) * i / steps))
+                    if point != last:  # a repeat would make _emit_abs step aside with the button held
+                        self._emit_abs(dev, *point)
+                        last = point
+                    time.sleep(duration / steps)
+            finally:
+                dev.emit(EV_KEY, code, 0)
+        remember_pointer(x2, y2)
 
     def type_text(self, text: str, interval: float) -> None:
         with self._keyboard() as dev:
@@ -2925,13 +2978,16 @@ def fingerprint_diff(a: list[int | None], b: list[int | None], tolerance: int = 
     return sum(1 for p, q in pairs if abs(p - q) > tolerance) / len(pairs)
 
 
-def guard_seen(args: argparse.Namespace, backend: Backend, point: tuple[int, int] | None = None) -> dict:
+def guard_seen(args: argparse.Namespace, backend: Backend, *points: tuple[int, int] | None) -> dict:
     """With --seen, abort before acting if the screen no longer looks like the screenshot
-    the agent read: around `point` for coordinate commands, over the whole capture for
-    keys and typing. Returns the `seen` fields for the OK line ({} without --seen)."""
+    the agent read: around each of `points` for coordinate commands (both ends of a drag),
+    over the whole capture for keys and typing (no points; None entries are skipped).
+    Returns the `seen` fields for the OK line ({} without --seen); `seen_diff` is the
+    largest difference found."""
     spec = getattr(args, "seen", None)
     if spec is None:
         return {}
+    targets = [p for p in points if p is not None]
     ref = load_reference(spec)
     # Capture the pointer the way the reference did: a pointer at rest then matches
     # itself even where its position is unknown (Wayland), and the masks cover it
@@ -2946,24 +3002,26 @@ def guard_seen(args: argparse.Namespace, backend: Backend, point: tuple[int, int
             seen=ref.path,
         )
     masks = ref.masks(known_pointer(backend, list_monitors(backend))[0])
-    if point is not None:
-        x, y = point
-        local = (x - ref.x, y - ref.y)
-        if not (0 <= local[0] < width and 0 <= local[1] < height):
-            raise CliError(
-                f"target ({x}, {y}) is outside the seen screenshot, which covers "
-                f"{ref.x}..{ref.x + width - 1}, {ref.y}..{ref.y + height - 1}",
-                seen=ref.path,
-            )
-        diff = patch_diff(ref.image, fresh.image, local, GUARD_RADIUS, masks)
-        if diff > GUARD_PATCH_MAX:
-            left, top, right, bottom = patch_box(ref.image.size, local)
-            raise CliError(
-                f"screen changed near ({x}, {y}) since {ref.path}: {diff:.0%} of the "
-                f"{right - left}x{bottom - top} px area around it differs (limit {GUARD_PATCH_MAX:.0%}); "
-                "take a new screenshot before acting",
-                seen=ref.path, changed=round(diff, 3), limit=GUARD_PATCH_MAX,
-            )
+    if targets:
+        diff = 0.0
+        for x, y in targets:
+            local = (x - ref.x, y - ref.y)
+            if not (0 <= local[0] < width and 0 <= local[1] < height):
+                raise CliError(
+                    f"target ({x}, {y}) is outside the seen screenshot, which covers "
+                    f"{ref.x}..{ref.x + width - 1}, {ref.y}..{ref.y + height - 1}",
+                    seen=ref.path,
+                )
+            here = patch_diff(ref.image, fresh.image, local, GUARD_RADIUS, masks)
+            if here > GUARD_PATCH_MAX:
+                left, top, right, bottom = patch_box(ref.image.size, local)
+                raise CliError(
+                    f"screen changed near ({x}, {y}) since {ref.path}: {here:.0%} of the "
+                    f"{right - left}x{bottom - top} px area around it differs (limit {GUARD_PATCH_MAX:.0%}); "
+                    "take a new screenshot before acting",
+                    seen=ref.path, changed=round(here, 3), limit=GUARD_PATCH_MAX,
+                )
+            diff = max(diff, here)
     else:
         diff = fingerprint_diff(fingerprint(ref.image, masks=masks), fingerprint(fresh.image, masks=masks))
         if diff > GUARD_SCREEN_MAX:
@@ -3210,19 +3268,38 @@ def cmd_grid(args: argparse.Namespace) -> None:
 
 def cmd_click(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
-    backend.check_point(args.x, args.y)
-    seen = guard_seen(args, backend, (args.x, args.y))
+    x, y = to_global(backend, args.monitor, args.x, args.y)
+    backend.check_point(x, y)
+    seen = guard_seen(args, backend, (x, y))
     clicks = 2 if args.double else 1
-    backend.click(args.x, args.y, args.button, clicks)
-    finish(args, "click", backend, x=args.x, y=args.y, button=args.button, clicks=clicks, **seen)
+    backend.click(x, y, args.button, clicks)
+    finish(
+        args, "click", backend, x=x, y=y, button=args.button, clicks=clicks,
+        **_monitor_fields(args), **seen,
+    )
 
 
 def cmd_move(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
-    backend.check_point(args.x, args.y)
-    seen = guard_seen(args, backend, (args.x, args.y))
-    backend.move(args.x, args.y)
-    finish(args, "move", backend, x=args.x, y=args.y, **seen)
+    x, y = to_global(backend, args.monitor, args.x, args.y)
+    backend.check_point(x, y)
+    seen = guard_seen(args, backend, (x, y))
+    backend.move(x, y)
+    finish(args, "move", backend, x=x, y=y, **_monitor_fields(args), **seen)
+
+
+def cmd_drag(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    x1, y1 = to_global(backend, args.monitor, args.x1, args.y1)
+    x2, y2 = to_global(backend, args.monitor, args.x2, args.y2)
+    backend.check_point(x1, y1)
+    backend.check_point(x2, y2)
+    seen = guard_seen(args, backend, (x1, y1), (x2, y2))
+    backend.drag(x1, y1, x2, y2, args.button, args.duration)
+    finish(
+        args, "drag", backend, x1=x1, y1=y1, x2=x2, y2=y2, button=args.button,
+        duration=args.duration, **_monitor_fields(args), **seen,
+    )
 
 
 def cmd_type(args: argparse.Namespace) -> None:
@@ -3257,22 +3334,25 @@ def cmd_hotkey(args: argparse.Namespace) -> None:
 def cmd_scroll(args: argparse.Namespace) -> None:
     if (args.x is None) != (args.y is None):
         raise CliError("give both --x and --y, or neither")
+    if args.monitor is not None and args.x is None:
+        raise CliError("--monitor needs --x and --y")
     backend = get_backend(args.backend)
-    point = None
-    if args.x is not None:
-        backend.check_point(args.x, args.y)
-        point = (args.x, args.y)
-    seen = guard_seen(args, backend, point)
+    x, y = args.x, args.y
+    if x is not None:
+        x, y = to_global(backend, args.monitor, x, y)
+        backend.check_point(x, y)
+    seen = guard_seen(args, backend, (x, y) if x is not None else None)
     notches = args.amount if args.direction == "up" else -args.amount
-    backend.scroll(notches, args.x, args.y)
+    backend.scroll(notches, x, y)
     finish(
         args,
         "scroll",
         backend,
         direction=args.direction,
         amount=args.amount,
-        x=args.x if args.x is not None else "current",
-        y=args.y if args.y is not None else "current",
+        x=x if x is not None else "current",
+        y=y if y is not None else "current",
+        **_monitor_fields(args),
         **seen,
     )
 
@@ -3786,12 +3866,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--y", type=int, required=True)
     p.add_argument("--button", choices=tuple(MOUSE_BUTTONS), default="left")
     p.add_argument("--double", action="store_true", help="double-click")
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_click)
 
     p = add("move", acting, help="move the mouse to a screen coordinate along a human-like path")
     p.add_argument("--x", type=int, required=True)
     p.add_argument("--y", type=int, required=True)
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_move)
+
+    p = add(
+        "drag", acting,
+        help="press a mouse button at one point, move to another, release (the mouse travels "
+        "to the start point along a human-like path)",
+    )
+    p.add_argument("--x1", type=int, required=True, help="start x")
+    p.add_argument("--y1", type=int, required=True, help="start y")
+    p.add_argument("--x2", type=int, required=True, help="end x")
+    p.add_argument("--y2", type=int, required=True, help="end y")
+    p.add_argument("--button", choices=tuple(MOUSE_BUTTONS), default="left")
+    p.add_argument(
+        "--duration", type=_non_negative_float, default=0.5,
+        help="seconds the move with the button held takes (default 0.5)",
+    )
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
+    p.set_defaults(func=cmd_drag)
 
     p = add("type", acting, help="type text one key at a time with human-like pauses (printable ASCII, newline, tab)")
     p.add_argument("--text", required=True)
@@ -3817,6 +3928,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--amount", type=_positive_int, default=3, help="wheel notches (default 3)")
     p.add_argument("--x", type=int, help="move here (along a human-like path) before scrolling")
     p.add_argument("--y", type=int, help="move here (along a human-like path) before scrolling")
+    p.add_argument(
+        "--monitor",
+        help="treat the coordinates as relative to this monitor's top-left "
+        "(primary or an index from 'ai-desktop monitors'; default: global coordinates)",
+    )
     p.set_defaults(func=cmd_scroll)
 
     p = add("copy", help="press the copy shortcut and print what was copied")

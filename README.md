@@ -1,5 +1,7 @@
 # AI Desktop Controller
 
+![ai-desktop typing into a window and dragging it around, every action from the CLI](docs/demo.gif)
+
 [![CI](https://github.com/MichaelDKulka/ai-desktop/actions/workflows/ci.yml/badge.svg)](https://github.com/MichaelDKulka/ai-desktop/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -42,12 +44,14 @@ Then finish the one-time steps for your platform under [Platform notes](#platfor
 ai-desktop screenshot [--grid] [--spacing auto|N] [--monitor all|primary|N] [--cursor auto|marker|none]
                       [--zoom X,Y [--radius 200] [--factor 3]] [--max-width 1920] [-o screenshot.png]
 ai-desktop grid --input image.png [-o gridded.png] [--spacing auto|N] [--max-width 1920]
-ai-desktop click --x 500 --y 300 [--button left|right|middle] [--double] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
-ai-desktop move --x 500 --y 300 [--instant] [--seen PATH|latest] [--shot [MONITOR]]
+ai-desktop click --x 500 --y 300 [--button left|right|middle] [--double] [--monitor N] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
+ai-desktop move --x 500 --y 300 [--monitor N] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
+ai-desktop drag --x1 200 --y1 150 --x2 900 --y2 400 [--duration 0.5] [--button left|right|middle] [--monitor N]
+                [--instant] [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop type --text "hello world" [--interval 0.02] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop key --key enter [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop hotkey --keys ctrl+c [--seen PATH|latest] [--shot [MONITOR]]
-ai-desktop scroll [--direction up|down] [--amount 3] [--x N --y N] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
+ai-desktop scroll [--direction up|down] [--amount 3] [--x N --y N [--monitor N]] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop copy
 ai-desktop paste [--text "any text, even é or ✓"] [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop wait (--stable | --changed PATH|latest) [--timeout 10] [--interval 0.5] [--monitor all] [--shot [MONITOR]]
@@ -84,7 +88,7 @@ ERROR (5000, 50) is on no monitor; monitors: 0 eDP-1 at 0,0 size 1366x768
 
 Exit codes: `0` ok, `1` error, `2` bad arguments (plain argparse text, never JSON; a bad `run` step is reported like any other error), `3` failsafe abort.
 
-**Human-like pacing.** By default `click`, `move` and `scroll --x/--y` glide to the target along a random curved path (up to 60 steps, about 0.15–1.5 s in total, slow-fast-slow) that lands **exactly** on the requested coordinates, stays on a monitor and never crosses a failsafe corner; the target is validated before anything moves. `type` sends one character at a time with a random 0.10–0.15 s pause after each character and 0.25–0.5 s after each space, newline or tab, so a 50-character, 8-word sentence takes about 8 s. `--instant` (or `AI_DESKTOP_HUMAN=0`) jumps straight to the target and types at the fixed `--interval`; `--seed N` (or `AI_DESKTOP_SEED`) makes the path and the pauses repeatable. `paste --text` is still the fast way to enter long text.
+**Human-like pacing.** By default `click`, `move`, `drag` (to its start point; the move with the button held is a straight line over `--duration`) and `scroll --x/--y` glide to the target along a random curved path (up to 60 steps, about 0.15–1.5 s in total, slow-fast-slow) that lands **exactly** on the requested coordinates, stays on a monitor and never crosses a failsafe corner; the target is validated before anything moves. `type` sends one character at a time with a random 0.10–0.15 s pause after each character and 0.25–0.5 s after each space, newline or tab, so a 50-character, 8-word sentence takes about 8 s. `--instant` (or `AI_DESKTOP_HUMAN=0`) jumps straight to the target and types at the fixed `--interval`; `--seed N` (or `AI_DESKTOP_SEED`) makes the path and the pauses repeatable. `paste --text` is still the fast way to enter long text.
 
 ```bash
 ai-desktop click --x 520 --y 340                 # curved path, about a second
@@ -144,9 +148,22 @@ ai-desktop monitors
 - Monitor `0` is always the primary; the others follow top-to-bottom, left-to-right. Coordinates are global: a monitor to the left of the primary has negative `x`.
 - `screenshot` captures **all monitors in one image** by default (black where no monitor is). `--monitor 1` captures one monitor, `--monitor primary` the primary. Either way the grid labels are global, so clicks need no arithmetic.
 - A multi-monitor image is usually wider than `--max-width`, so it is shrunk and gets automatic spacing of 200 or more, which keeps its labels legible. For precise clicks look closer with `--monitor N` or `--zoom X,Y`.
-- `click`, `move` and `scroll` accept any point on any monitor. `position` reports `monitor=` for the pointer.
+- `click`, `move`, `drag` and `scroll` accept any point on any monitor. `position` reports `monitor=` for the pointer.
 - The layout comes from `xrandr` (Linux, also under Xwayland), `EnumDisplayMonitors` (Windows) or Quartz (macOS). If it can't be read, the tool assumes one screen and `doctor` warns.
 - Known limit: Windows with *different* scaling per monitor isn't handled; keep the same scaling everywhere (100% recommended).
+
+### Monitor-relative coordinates
+
+`click`, `move`, `drag` and `scroll` take global coordinates by default. Add `--monitor N`
+(an index from `monitors`, or `primary`) and x/y are relative to that monitor's top-left,
+which matches the pixels of `screenshot --monitor N` without grid labels:
+
+```bash
+ai-desktop click --monitor 1 --x 100 --y 50        # 100,50 inside monitor 1
+ai-desktop drag  --monitor 1 --x1 560 --y1 155 --x2 1100 --y2 420
+```
+
+A point outside that monitor is rejected. The MCP tools take the same optional `monitor`.
 
 ## Windows and focus
 
@@ -212,7 +229,7 @@ Clipboard tools: macOS `pbcopy`/`pbpaste` and Windows PowerShell are built in; L
 
 ## Seen, shot, wait and run
 
-**`--seen SCREENSHOT|latest`** on `click`, `move`, `scroll`, `type`, `key`, `hotkey` and `paste` checks, just before acting, that the screen still looks like the screenshot the agent read. If it doesn't, the command fails with exit 1 and nothing is moved or typed. `click`, `move` and `scroll --x/--y` compare the 129x129 px area around the target (limit: 5% of its pixels changed); the other commands compare a coarse fingerprint of the whole screen (limit 10%: a toast passes, a dialog doesn't). `latest` is the newest screenshot in the store; for a file written with `-o`, pass its path. The check costs one capture (about 1 s on GNOME), and a pointer the capture tool drew into the reference is ignored.
+**`--seen SCREENSHOT|latest`** on `click`, `move`, `drag`, `scroll`, `type`, `key`, `hotkey` and `paste` checks, just before acting, that the screen still looks like the screenshot the agent read. If it doesn't, the command fails with exit 1 and nothing is moved or typed. `click`, `move`, `drag` (both ends) and `scroll --x/--y` compare the 129x129 px area around the target (limit: 5% of its pixels changed); the other commands compare a coarse fingerprint of the whole screen (limit 10%: a toast passes, a dialog doesn't). `latest` is the newest screenshot in the store; for a file written with `-o`, pass its path. The check costs one capture (about 1 s on GNOME), and a pointer the capture tool drew into the reference is ignored.
 
 ```bash
 ai-desktop click --x 520 --y 340 --seen latest
@@ -315,10 +332,10 @@ If you are writing an agent against a model API, the easiest route is the MCP se
 
 ## MCP server
 
-`ai-desktop mcp` runs the same commands as an [MCP](https://modelcontextprotocol.io) server over stdio. Every command is a tool with the same name (`screenshot`, `click`, `move`, `type`, `key`, `hotkey`, `scroll`, `wait`, `run`, `copy`, `paste`, `clipboard_get`, `clipboard_set`, `position`, `windows`, `focus`, `monitors`, `launch_chrome`, `screenshots_latest`, `log`, `doctor`), and the **`screenshot` tool returns the saved PNG inline**, so the model sees it without opening a file; it takes `grid`, `spacing`, `monitor`, `zoom`, `cursor` and `max_width`. Errors come back as tool errors with the same messages as the CLI, and every call lands in the action log as `via=mcp` (`mcp/run` for the steps of `run`).
+`ai-desktop mcp` runs the same commands as an [MCP](https://modelcontextprotocol.io) server over stdio. Every command is a tool with the same name (`screenshot`, `click`, `move`, `drag`, `type`, `key`, `hotkey`, `scroll`, `wait`, `run`, `copy`, `paste`, `clipboard_get`, `clipboard_set`, `position`, `windows`, `focus`, `monitors`, `launch_chrome`, `screenshots_latest`, `log`, `doctor`), and the **`screenshot` tool returns the saved PNG inline**, so the model sees it without opening a file; it takes `grid`, `spacing`, `monitor`, `zoom`, `cursor` and `max_width`. Errors come back as tool errors with the same messages as the CLI, and every call lands in the action log as `via=mcp` (`mcp/run` for the steps of `run`).
 
-- `click`, `move`, `scroll` and `type` accept `instant=true` to skip the human-like path and typing pauses.
-- `click`, `move`, `scroll`, `type`, `key`, `hotkey` and `paste` accept `seen` (`"latest"` or a screenshot path) and `shot=true`; the new screenshot comes back inline in the same result.
+- `click`, `move`, `drag`, `scroll` and `type` accept `instant=true` to skip the human-like path and typing pauses.
+- `click`, `move`, `drag`, `scroll`, `type`, `key`, `hotkey` and `paste` accept `seen` (`"latest"` or a screenshot path) and `shot=true`; the new screenshot comes back inline in the same result.
 - `wait` takes `stable` (the default), `changed`, `timeout` (at most 30 s here) and `shot`; `run` takes `steps` as a list of argument lists.
 - The server keeps the uinput devices open for its whole lifetime, so on Wayland only the first action of each kind waits for the compositor.
 

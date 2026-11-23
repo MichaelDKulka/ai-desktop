@@ -117,6 +117,20 @@ def test_click_ignores_changes_elsewhere(run, fake_gui, desk):
     assert code == 0 and "seen_diff=0.0" in out
 
 
+def test_drag_checks_the_areas_around_both_ends(run, fake_gui, desk):
+    path = shoot(run)
+    drag = ("drag", "--x1", "300", "--y1", "300", "--x2", "1200", "--y2", "600", "--seen", path)
+    paint(desk, 1150, 550, 1260, 660)  # something new over the drop target
+    fake_gui.calls.clear()
+    code, _, err = run(*drag)
+    assert code == 1 and err.startswith("ERROR screen changed near (1200, 600) since ")
+    assert fake_gui.calls == []
+    paint(desk, 1150, 550, 1260, 660, colour=WHITE)
+    code, out, _ = run(*drag)
+    assert code == 0 and out.endswith(f"seen={path} seen_diff=0.0\n")
+    assert len(desk["calls"]) == 3  # the screenshot and one capture per guarded drag
+
+
 def test_typing_checks_the_whole_screen(run, fake_gui, desk):
     path = shoot(run)
     paint(desk, 1500, 950, 1850, 1030)  # a toast: fine

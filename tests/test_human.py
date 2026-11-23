@@ -184,6 +184,30 @@ def test_uinput_click_glides_and_remembers(uinput):
     assert ad.recall_pointer() == (500, 300)
 
 
+def test_uinput_drag_glides_presses_moves_straight_and_releases(uinput):
+    uinput.drag(500, 300, 540, 300, "left", 0.2)
+    down = FakeDev.events.index((ad.EV_KEY, ad.BTN_LEFT, 1))
+    before, held = abs_points(FakeDev.events[:down]), abs_points(FakeDev.events[down:])
+    assert len(before) > 1 and before[-1] == (500, 300)  # the glide lands on the start
+    assert all(on_screen(x, y) for x, y in before)
+    assert held[-1] == (540, 300) and all(y == 300 for _, y in held)
+    assert len(held) == len(set(held))  # no repeats, so a reused device never steps aside
+    assert FakeDev.events[-1] == (ad.EV_KEY, ad.BTN_LEFT, 0)
+    assert ad.recall_pointer() == (540, 300)
+
+
+def test_uinput_drag_releases_if_the_move_fails(uinput, monkeypatch):
+    def boom(dev, x, y):
+        raise RuntimeError("write failed")
+
+    monkeypatch.setattr(ad, "HUMAN_INPUT", False)
+    monkeypatch.setattr(uinput, "_emit_abs", boom)
+    monkeypatch.setattr(uinput, "_move_to", lambda dev, x, y: None)
+    with pytest.raises(RuntimeError):
+        uinput.drag(500, 300, 540, 300, "right", 0.2)
+    assert FakeDev.events[-1] == (ad.EV_KEY, ad.BTN_RIGHT, 0)
+
+
 def test_uinput_starts_from_the_remembered_position(uinput):
     ad.remember_pointer(100, 100)
     uinput.move(900, 700)

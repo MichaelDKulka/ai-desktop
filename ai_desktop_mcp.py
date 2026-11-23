@@ -142,6 +142,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         y: int,
         button: str = "left",
         double: bool = False,
+        monitor: str | None = None,
         instant: bool = False,
         seen: str | None = None,
         shot: bool = False,
@@ -149,21 +150,53 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         """Click at a screen coordinate (button: left, right or middle).
 
         The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
-        straight there. seen="latest" (or a screenshot path) aborts without clicking if
-        the screen around (x, y) changed since that screenshot; shot=true returns a new
-        screenshot taken right after the click."""
-        argv = ["click", "--x", str(x), "--y", str(y), "--button", button]
+        straight there. monitor="N" (or "primary") makes x and y relative to that monitor's
+        top-left instead of global. seen="latest" (or a screenshot path) aborts without
+        clicking if the screen around (x, y) changed since that screenshot; shot=true
+        returns a new screenshot taken right after the click."""
+        argv = ["click", "--x", str(x), "--y", str(y), "--button", button] + _opt("--monitor", monitor)
         argv += (["--double"] if double else []) + _instant(instant) + _acting(seen, shot)
         return _with_shot(run(argv))
 
     @tool(ACTION)
-    def move(x: int, y: int, instant: bool = False, seen: str | None = None, shot: bool = False) -> list:
+    def move(
+        x: int,
+        y: int,
+        monitor: str | None = None,
+        instant: bool = False,
+        seen: str | None = None,
+        shot: bool = False,
+    ) -> list:
         """Move the mouse to a screen coordinate without clicking.
 
         The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
-        straight there. seen and shot work as for click."""
-        argv = ["move", "--x", str(x), "--y", str(y)] + _instant(instant) + _acting(seen, shot)
-        return _with_shot(run(argv))
+        straight there. monitor, seen and shot work as for click."""
+        argv = ["move", "--x", str(x), "--y", str(y)] + _opt("--monitor", monitor)
+        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
+
+    @tool(ACTION)
+    def drag(
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        button: str = "left",
+        duration: float = 0.5,
+        monitor: str | None = None,
+        instant: bool = False,
+        seen: str | None = None,
+        shot: bool = False,
+    ) -> list:
+        """Press `button` at (x1, y1), move to (x2, y2) over `duration` seconds, release.
+        Moves windows, sliders, selections.
+
+        The pointer travels to (x1, y1) along a human-like path first; instant=True jumps
+        straight there. monitor="N" makes all points monitor-relative. seen="latest" aborts
+        if the screen around either point changed since that screenshot; shot works as for
+        click."""
+        argv = ["drag", "--x1", str(x1), "--y1", str(y1), "--x2", str(x2), "--y2", str(y2)]
+        argv += ["--button", button, "--duration", str(duration)] + _opt("--monitor", monitor)
+        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION, name="type")
     def type_text(
@@ -196,16 +229,18 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         amount: int = 3,
         x: int | None = None,
         y: int | None = None,
+        monitor: str | None = None,
         instant: bool = False,
         seen: str | None = None,
         shot: bool = False,
     ) -> list:
         """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y).
 
-        The move travels along a human-like path; instant=True jumps straight there. seen
-        and shot work as for click."""
+        The move travels along a human-like path; instant=True jumps straight there.
+        monitor, seen and shot work as for click."""
         argv = ["scroll", "--direction", direction, "--amount", str(amount)]
-        argv += _opt("--x", x) + _opt("--y", y) + _instant(instant) + _acting(seen, shot)
+        argv += _opt("--x", x) + _opt("--y", y) + _opt("--monitor", monitor)
+        argv += _instant(instant) + _acting(seen, shot)
         return _with_shot(run(argv))
 
     @tool(READ_ONLY)

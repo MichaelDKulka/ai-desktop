@@ -12,7 +12,7 @@ and rules as the commands below.
 2. Read the target's coordinates off the labelled grid. **Labels are screen coordinates**:
    pass them to `click` unchanged, even when they are negative (a monitor left of the
    primary one) and even in a zoomed or shrunk image.
-3. Do ONE action: `click`, `move`, `type`, `key`, `hotkey`, `scroll`, `paste --text`, `copy`.
+3. Do ONE action: `click`, `move`, `drag`, `type`, `key`, `hotkey`, `scroll`, `paste --text`, `copy`.
    Add `--seen latest` (all but `copy`): the action is refused, doing nothing, if the screen
    changed since your screenshot. Add `--shot` to get the next screenshot from the same
    call; its path is printed as `shot=`.
@@ -38,13 +38,14 @@ ai-desktop screenshot [--grid] [--spacing auto|N] [--monitor all|primary|N] [-o 
 ai-desktop screenshot --zoom X,Y [--radius 200] [--factor 3]   # enlarged close-up
 ai-desktop click --x N --y N [--button left|right|middle] [--double] [--instant]
 ai-desktop move --x N --y N [--instant]
+ai-desktop drag --x1 N --y1 N --x2 N --y2 N [--duration 0.5] [--button left|right|middle] [--instant]
 ai-desktop type --text "ascii text" [--instant]
 ai-desktop key --key enter
 ai-desktop hotkey --keys ctrl+c
 ai-desktop scroll [--direction up|down] [--amount 3] [--x N --y N] [--instant]
 ai-desktop copy                      # press copy, then print what was copied
 ai-desktop paste [--text "any text"] # put text on the clipboard, then press paste
-#   click, move, type, key, hotkey, scroll and paste also take:
+#   click, move, drag, type, key, hotkey, scroll and paste also take:
 #   --seen latest   abort, doing nothing, if the screen changed since that screenshot
 #   --shot          take a gridded screenshot after acting; its path is printed as shot=
 ai-desktop wait --stable | --changed latest [--timeout 10] [--shot]
@@ -78,8 +79,9 @@ ai-desktop doctor
 - Typing is paced like a person: about 0.1–0.15 s per character and 0.25–0.5 s after each
   space, so a 50-character sentence takes roughly 8 s. Use `paste --text` for more than
   a sentence or two, or add `--instant` for the fixed fast cadence.
-- `click`, `move` and `scroll --x/--y` glide along a random curved path that lands exactly
-  on the coordinates you gave. Add `--instant` to any command to jump straight there.
+- `click`, `move`, `drag` (to its start point) and `scroll --x/--y` glide along a random
+  curved path that lands exactly on the coordinates you gave. Add `--instant` to any
+  command to jump straight there.
 - Key names: `enter`, `tab`, `esc`, `space`, `backspace`, `delete`, `up`, `down`, `left`,
   `right`, `home`, `end`, `pageup`, `pagedown`, `f1`–`f12`, `ctrl`, `shift`, `alt`, `cmd`
   (same as `win`). Combine with `+`: `hotkey --keys ctrl+shift+t`.

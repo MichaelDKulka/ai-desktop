@@ -17,7 +17,7 @@ def test_command_writes_one_entry(run, fake_gui):
     [entry] = entries()
     assert entry["command"] == "click" and entry["ok"] is True and entry["code"] == 0
     assert entry["via"] == "cli" and entry["backend"] == "auto"
-    assert entry["args"] == {"x": 500, "y": 300, "button": "left", "double": False}
+    assert entry["args"] == {"x": 500, "y": 300, "button": "left", "double": False, "monitor": None}
     assert entry["result"] == {"x": 500, "y": 300, "button": "left", "clicks": 1}
     assert isinstance(entry["ms"], int) and entry["ts"][:4].isdigit()
 
