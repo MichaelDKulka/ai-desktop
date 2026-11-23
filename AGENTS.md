@@ -18,8 +18,8 @@ and rules as the commands below.
    call; its path is printed as `shot=`.
 4. Look at that new screenshot and confirm the action worked before doing the next one.
 
-- Opened a page or an app? `ai-desktop wait --stable --shot` waits until the screen stops
-  changing, then takes the screenshot.
+- Opened a page or an app? `ai-desktop wait --changed latest --settle --shot` waits until the
+  screen changes and then stops changing, then takes the screenshot.
 - Lost the path? `ai-desktop screenshots latest`.
 - Target small or between grid lines? `ai-desktop screenshot --zoom X,Y` shows the area
   around that point enlarged; its labels are still screen coordinates. (`--grid --spacing 50`
@@ -48,7 +48,7 @@ ai-desktop paste [--text "any text"] # put text on the clipboard, then press pas
 #   click, move, drag, type, key, hotkey, scroll and paste also take:
 #   --seen latest   abort, doing nothing, if the screen changed since that screenshot
 #   --shot          take a gridded screenshot after acting; its path is printed as shot=
-ai-desktop wait --stable | --changed latest [--timeout 10] [--shot]
+ai-desktop wait --stable | --changed latest [--settle] [--quiet 1] [--timeout 10] [--shot]
 ai-desktop run --steps '[["click","--x","500","--y","300"], "key --key enter"]' [--shot]
 ai-desktop clipboard get|set [--text "..."]
 ai-desktop position

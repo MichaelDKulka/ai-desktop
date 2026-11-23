@@ -71,8 +71,11 @@ def test_shot_settle_delay_is_configurable(run, fake_gui, frames, sleeps, monkey
 def test_wait_stable_returns_once_two_captures_match(run, fake_gui, frames, sleeps):
     frames.queue[:] = [frame((0, 0, 900, 500)), frame(), frame()]
     code, out, _ = run("wait", "--stable")
-    assert code == 0 and out.startswith("OK wait mode=stable polls=3 elapsed=1.0 diff=0.0")
-    assert sleeps == [0.5, 0.5] and frames.asked == [False, False, False]
+    # Stable means unchanged for --quiet (1 s): frames 2, 3 and 4 match over 0.5 to 1.5 s.
+    assert code == 0 and out.startswith("OK wait mode=stable polls=4 elapsed=1.5 diff=0.0")
+    assert sleeps == [0.5, 0.5, 0.5] and frames.asked == [False, False, False, False]
+    code, out, _ = run("wait", "--stable", "--quiet", "0")
+    assert code == 0 and "polls=2 " in out  # one matching pair is enough with no quiet time
 
 
 def test_wait_stable_gives_up_on_a_screen_that_keeps_changing(run, fake_gui, monkeypatch):
@@ -100,7 +103,7 @@ def test_wait_changed_ignores_small_changes(run, fake_gui, frames):
 
 def test_wait_shot_reuses_the_last_capture(run, fake_gui, frames):
     code, out, _ = run("wait", "--stable", "--shot")
-    assert code == 0 and " shot=" in out and len(frames.asked) == 2  # two polls, no third capture
+    assert code == 0 and " shot=" in out and len(frames.asked) == 3  # 1 s quiet; no extra capture for the shot
     assert ad.store_files()[0][0].name.endswith("-grid100.png")
 
 
@@ -130,11 +133,11 @@ def test_run_stops_at_the_first_failure(run, fake_gui):
     steps = [
         ["move", "--x", "500", "--y", "300"],
         ["type", "--text", "hunter2"],
-        ["click", "--x", "0", "--y", "0"],
+        ["click", "--x", "500", "--y", "300", "--seen", "latest"],  # no screenshot yet: fails only when run
         ["key", "--key", "enter"],
     ]
     code, _, err = run("run", "--steps", json.dumps(steps))
-    assert code == 1 and err.startswith("ERROR step 3 (click) failed: (0, 0) is a failsafe corner")
+    assert code == 1 and err.startswith("ERROR step 3 (click) failed: --seen latest: no screenshots")
     assert not any(c[0] in ("click", "press") for c in fake_gui.calls)
     _, out, _ = run("--json", "run", "--steps", json.dumps(steps))
     data = json.loads(out)
@@ -305,3 +308,39 @@ def test_unbalanced_quote_error_keeps_the_text_out_of_the_log(run, fake_gui):
     assert code == 2 and "step 1 (type): cannot split" in err and "hunter2" not in err
     log = ad.log_files()[0][0].read_text(encoding="utf-8")
     assert "hunter2" not in log
+
+
+@pytest.mark.parametrize("bad_step,reason", [
+    (["type", "--text", "Hello — world"], "ASCII only"),
+    (["key", "--key", "bogus"], "unknown key"),
+    (["hotkey", "--keys", "ctrl+"], "bad hotkey"),
+    (["click", "--x", "5000", "--y", "10"], "on no monitor"),
+    (["click", "--x", "0", "--y", "0"], "failsafe corner"),
+    (["drag", "--x1", "10", "--y1", "10", "--x2", "9999", "--y2", "10"], "on no monitor"),
+    (["scroll", "--x", "10"], "give both --x and --y"),
+    (["move", "--x", "10", "--y", "10", "--seen", "/no/such/shot.png"], "--seen file not found"),
+])
+def test_run_checks_every_step_before_the_first_acts(run, fake_gui, bad_step, reason):
+    steps = json.dumps([["click", "--x", "500", "--y", "300"], bad_step])
+    code, _, err = run("run", "--steps", steps)
+    assert code != 0 and "step 2" in err and reason in err
+    assert fake_gui.calls == []  # the first step did not click
+
+
+def test_wait_stable_is_not_fooled_by_one_quiet_moment(run, fake_gui, frames):
+    # A spinner or a loading page can look the same in two captures half a second apart.
+    frames.queue[:] = [frame(), frame(), frame((0, 0, 900, 500)), frame((0, 0, 900, 500)), frame((0, 0, 900, 500)), frame((0, 0, 900, 500))]
+    code, out, _ = run("wait", "--stable", "--quiet", "1")
+    # Captures 1 and 2 match, but only for 0.5 s (the old rule stopped there, at polls=2);
+    # the window appears at 1 s and stays unchanged from 1 s to 2 s.
+    assert code == 0 and "polls=5 elapsed=2.0 " in out
+
+
+def test_wait_changed_then_stable(run, fake_gui, frames):
+    path = run("screenshot", "--grid")[1].split("path=")[1].split()[0]
+    window = frame((0, 0, 900, 500))
+    frames.queue[:] = [frame(), window, frame((0, 0, 950, 520)), window, window, window]
+    code, out, _ = run("wait", "--changed", path, "--settle", "--quiet", "1")
+    assert code == 0 and "mode=changed-then-stable polls=6 " in out
+    code, _, err = run("wait", "--stable", "--settle")
+    assert code == 2 and "--settle goes with --changed" in err

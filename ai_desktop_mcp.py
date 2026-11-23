@@ -317,15 +317,24 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
 
     @tool(READ_ONLY)
     async def wait(
-        stable: bool = True, changed: str = "", timeout: float = 10.0, shot: bool = False
+        stable: bool = True,
+        changed: str = "",
+        settle: bool = False,
+        quiet: float = 1.0,
+        timeout: float = 10.0,
+        shot: bool = False,
     ) -> list:
-        """Wait until the screen stops changing (default), or until it differs from the
-        screenshot `changed` ("latest" or a path). Fails after `timeout` seconds (at most
-        30 here). shot=true returns the final screen as a gridded screenshot."""
+        """Wait until the screen has stopped changing for `quiet` seconds (default), or
+        until it differs from the screenshot `changed` ("latest" or a path); with
+        settle=true, until it changed and then stopped changing, the thing to use after
+        opening an app or a page. Fails after `timeout` seconds (at most 30 here).
+        shot=true returns the final screen as a gridded screenshot."""
         if not stable and not changed:
             raise CommandError("give stable=true, or changed=\"latest\" (or a screenshot path)")
         argv = ["wait"] + (_opt("--changed", changed) if changed else ["--stable"])
-        argv += ["--timeout", str(min(max(timeout, 0.0), 30.0))] + (["--shot"] if shot else [])
+        argv += ["--settle"] if settle and changed else []
+        argv += ["--quiet", str(max(quiet, 0.0)), "--timeout", str(min(max(timeout, 0.0), 30.0))]
+        argv += ["--shot"] if shot else []
         return _with_shot(await _run(argv))
 
     @tool(ACTION, name="run")

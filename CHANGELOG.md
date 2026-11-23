@@ -88,6 +88,15 @@
   silently a `--stable` wait; it is now an error.
 - **MCP: inline images have a size budget.** Screenshots over about 900 KB as PNG go inline
   as JPEG (smaller still if needed), since some clients reject results over 1 MB.
+- **`run` checks every step before the first acts.** Only the argument syntax was checked
+  up front, so non-ASCII text in a later `type` step, an unknown key, an off-screen point
+  or a missing `--seen` file failed after earlier steps had already clicked. These checks
+  now run for all steps first.
+- **`wait --stable` waits for real quiet.** One matching pair of captures half a second
+  apart counted as stable, so a spinner, or a page that hadn't started loading, passed.
+  The screen must now be unchanged for `--quiet` seconds (default 1). New
+  `wait --changed SCREENSHOT --settle` waits for a change and then for quiet; the MCP
+  `wait` tool has `settle` and `quiet`.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

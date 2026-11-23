@@ -55,7 +55,7 @@ ai-desktop hotkey --keys ctrl+c [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop scroll [--direction up|down] [--amount 3] [--x N --y N [--monitor N]] [--instant] [--seen PATH|latest] [--shot [MONITOR]]
 ai-desktop copy
 ai-desktop paste [--text "any text, even é or ✓"] [--seen PATH|latest] [--shot [MONITOR]]
-ai-desktop wait (--stable | --changed PATH|latest) [--timeout 10] [--interval 0.5] [--monitor all] [--shot [MONITOR]]
+ai-desktop wait (--stable | --changed PATH|latest [--settle]) [--quiet 1] [--timeout 10] [--interval 0.5] [--monitor all] [--shot [MONITOR]]
 ai-desktop run (--steps JSON | --file PATH|-) [--shot [MONITOR]]
 ai-desktop clipboard get|set [--text "..."]
 ai-desktop position
@@ -249,7 +249,7 @@ ai-desktop click --x 520 --y 340 --seen latest --shot
 # OK click x=520 y=340 button=left clicks=1 seen=... seen_diff=0.0 shot=/home/me/.ai-desktop/screenshots/20261012-101911-480-grid100.png
 ```
 
-**`wait`** watches the screen instead of guessing a sleep. `--stable` returns once two captures in a row match, which is the thing to do after opening a page or an app; `--changed SCREENSHOT|latest` returns once the screen differs from that screenshot by more than 2%. `--interval` (default 0.5 s) is the pause between captures, and `--monitor` picks the screen `--stable` watches. After `--timeout` seconds (default 10, at most 300) it fails with exit 1: `screen still changing after 10 s ...` or `screen unchanged after 10 s ...`. With `--shot`, the last capture becomes the screenshot, at no extra cost.
+**`wait`** watches the screen instead of guessing a sleep. `--stable` returns once the screen has not changed for `--quiet` seconds (default 1), so a spinner or a page that hasn't started loading doesn't count as settled; `--changed SCREENSHOT --settle` waits for the change and then for quiet, the thing to do after opening a page or an app; `--changed SCREENSHOT|latest` returns once the screen differs from that screenshot by more than 2%. `--interval` (default 0.5 s) is the pause between captures, and `--monitor` picks the screen `--stable` watches. After `--timeout` seconds (default 10, at most 300) it fails with exit 1: `screen still changing after 10 s ...` or `screen unchanged after 10 s ...`. With `--shot`, the last capture becomes the screenshot, at no extra cost.
 
 ```bash
 ai-desktop launch-chrome --url https://example.com
@@ -257,7 +257,7 @@ ai-desktop wait --stable --timeout 20 --shot
 # OK wait mode=stable polls=3 elapsed=2.9 diff=0.0 shot=/home/me/.ai-desktop/screenshots/20261012-101930-212-grid100.png
 ```
 
-**`run`** does several commands in one process. `--steps` takes a JSON list whose items are argument lists (`["click","--x","500","--y","300"]`) or command strings (`"key --key enter"`); `--file PATH` reads the list from a file, `--file -` from stdin. Every step's arguments are checked before any step runs (a bad one exits 2), and `run`, `mcp` and `resume` can't be steps. It stops at the first failure with `ERROR step 3 (click) failed: <reason>` and that step's exit code (3 when the human stopped it). `--backend` and `--instant` given to `run` apply to every step, and `--shot` takes a screenshot after the last one. Each step is logged as its own entry with `via` set to `cli/run` (or `mcp/run`). On Wayland the virtual input devices stay open across steps, so only the first action of each kind pays the ~0.5 s device delay: measured live, three moves took 1.0 s as one `run` and 2.45 s as three commands. Use it only for short sequences you are sure of, and still look at the screen afterwards.
+**`run`** does several commands in one process. `--steps` takes a JSON list whose items are argument lists (`["click","--x","500","--y","300"]`) or command strings (`"key --key enter"`); `--file PATH` reads the list from a file, `--file -` from stdin. Every step is checked before any step runs: its arguments (a bad one exits 2) and whatever can be checked without acting, such as typeable text, key names, points on a monitor and a named `--seen` file, and `run`, `mcp` and `resume` can't be steps. It stops at the first failure with `ERROR step 3 (click) failed: <reason>` and that step's exit code (3 when the human stopped it). `--backend` and `--instant` given to `run` apply to every step, and `--shot` takes a screenshot after the last one. Each step is logged as its own entry with `via` set to `cli/run` (or `mcp/run`). On Wayland the virtual input devices stay open across steps, so only the first action of each kind pays the ~0.5 s device delay: measured live, three moves took 1.0 s as one `run` and 2.45 s as three commands. Use it only for short sequences you are sure of, and still look at the screen afterwards.
 
 ```bash
 ai-desktop run --shot --steps '[["click","--x","500","--y","300"], "type --text hello", "key --key enter"]'
@@ -268,7 +268,7 @@ ai-desktop run --shot --steps '[["click","--x","500","--y","300"], "type --text 
 
 ```bash
 # 1. See the screen
-ai-desktop focus --title "Chrome"      # or launch-chrome, then: ai-desktop wait --stable
+ai-desktop focus --title "Chrome"      # or launch-chrome, then: ai-desktop wait --changed latest --settle
 ai-desktop screenshot --grid
 #    -> OK screenshot path=/home/me/.ai-desktop/screenshots/20261012-101905-123-grid100.png ...
 #    -> the agent opens that image and reads coordinates off the grid
@@ -289,7 +289,7 @@ Tips for agents:
 - Look at a fresh screenshot after every action instead of assuming it worked; `--shot` takes it in the same call.
 - If an action fails with "screen changed", nothing happened: take a new screenshot and read it again before acting.
 - If a target is small or sits between grid lines, `screenshot --zoom X,Y` shows it enlarged; `--spacing 50` or `--monitor N` also help.
-- After opening a page or an app, use `wait --stable` instead of a fixed sleep.
+- After opening a page or an app, use `wait --changed latest --settle` (or `wait --stable`) instead of a fixed sleep.
 - Use `windows` to find out what is open and `focus` before typing into a window. Take the screenshot after `focus`, since it changes the screen.
 
 ## Connecting an AI agent

@@ -233,7 +233,7 @@ def test_monitor_layout_is_detected_once_per_command(run, fake_gui, monkeypatch)
     assert code == 0 and len(calls) == 1
     calls.clear()
     code, _, _ = run("run", "--steps", '[["move","--x","5","--y","5","--monitor","0"],["move","--x","9","--y","9"]]')
-    assert code == 0 and len(calls) == 2  # once per step: each step is its own command
+    assert code == 0 and len(calls) == 3  # once for run's up-front checks, then once per step
     calls.clear()
     ad.list_monitors(ad.get_backend("pyautogui"))
     ad.list_monitors(ad.get_backend("pyautogui"))

@@ -3700,10 +3700,64 @@ def cmd_drag(args: argparse.Namespace) -> None:
     )
 
 
-def cmd_type(args: argparse.Namespace) -> None:
-    bad = sorted({c for c in args.text if c not in TYPEABLE})
+def check_typeable(text: str) -> None:
+    bad = sorted({c for c in text if c not in TYPEABLE})
     if bad:
         raise CliError("cannot type these characters (ASCII only): " + " ".join(map(repr, bad)))
+
+
+def hotkey_keys(backend: Backend, spec: str) -> list:
+    """The backend's keys for a combination like ctrl+shift+t."""
+    names = spec.split("+")
+    if any(not n.strip() for n in names):
+        raise CliError(f"bad hotkey {spec!r}; use names joined by '+', e.g. ctrl+shift+t")
+    names = [n.strip() for n in names]
+    # A single capital letter means shift+letter (for `key` and typing), but in a
+    # combination "Ctrl+C" means ctrl+c: Ctrl+Shift+C would open Chrome's inspector and
+    # Ctrl+Shift+W close the whole window. An explicit "shift" still adds shift.
+    if any(normalize_key(n) in ("ctrl", "alt", "meta") for n in names):
+        names = [n.lower() if len(n) == 1 else n for n in names]
+    return [backend.resolve_key(n) for n in names]
+
+
+def scroll_point(args: argparse.Namespace, backend: Backend) -> tuple[int | None, int | None]:
+    if (args.x is None) != (args.y is None):
+        raise CliError("give both --x and --y, or neither")
+    if args.monitor is not None and args.x is None:
+        raise CliError("--monitor needs --x and --y")
+    if args.x is None:
+        return None, None
+    x, y = to_global(backend, args.monitor, args.x, args.y)
+    backend.check_point(x, y)
+    return x, y
+
+
+def precheck(args: argparse.Namespace, backend_for) -> None:
+    """Every check a command makes before it acts, without acting: `run` calls this for
+    all steps first, so a bad later step fails before an earlier one has clicked."""
+    cmd = args.command
+    if cmd == "type":
+        check_typeable(args.text)
+    elif cmd == "key":
+        backend_for().resolve_key(args.key)
+    elif cmd == "hotkey":
+        hotkey_keys(backend_for(), args.keys)
+    elif cmd in ("click", "move"):
+        backend = backend_for()
+        backend.check_point(*to_global(backend, args.monitor, args.x, args.y))
+    elif cmd == "drag":
+        backend = backend_for()
+        backend.check_point(*to_global(backend, args.monitor, args.x1, args.y1))
+        backend.check_point(*to_global(backend, args.monitor, args.x2, args.y2))
+    elif cmd == "scroll":
+        scroll_point(args, backend_for())
+    seen = getattr(args, "seen", None)
+    if seen is not None and seen != "latest" and not Path(seen).expanduser().is_file():
+        raise CliError(f"--seen file not found: {seen}")  # "latest" may come from an earlier step
+
+
+def cmd_type(args: argparse.Namespace) -> None:
+    check_typeable(args.text)
     backend = get_backend(args.backend)
     with guarded(args, backend, "keyboard"):
         seen = guard_seen(args, backend)
@@ -3721,17 +3775,8 @@ def cmd_key(args: argparse.Namespace) -> None:
 
 
 def cmd_hotkey(args: argparse.Namespace) -> None:
-    names = args.keys.split("+")
-    if any(not n.strip() for n in names):
-        raise CliError(f"bad hotkey {args.keys!r}; use names joined by '+', e.g. ctrl+shift+t")
-    names = [n.strip() for n in names]
-    # A single capital letter means shift+letter (for `key` and typing), but in a
-    # combination "Ctrl+C" means ctrl+c: Ctrl+Shift+C would open Chrome's inspector and
-    # Ctrl+Shift+W close the whole window. An explicit "shift" still adds shift.
-    if any(normalize_key(n) in ("ctrl", "alt", "meta") for n in names):
-        names = [n.lower() if len(n) == 1 else n for n in names]
     backend = get_backend(args.backend)
-    keys = [backend.resolve_key(n) for n in names]
+    keys = hotkey_keys(backend, args.keys)
     with guarded(args, backend, "keyboard"):
         seen = guard_seen(args, backend)
         backend.hotkey(keys)
@@ -3739,15 +3784,8 @@ def cmd_hotkey(args: argparse.Namespace) -> None:
 
 
 def cmd_scroll(args: argparse.Namespace) -> None:
-    if (args.x is None) != (args.y is None):
-        raise CliError("give both --x and --y, or neither")
-    if args.monitor is not None and args.x is None:
-        raise CliError("--monitor needs --x and --y")
     backend = get_backend(args.backend)
-    x, y = args.x, args.y
-    if x is not None:
-        x, y = to_global(backend, args.monitor, x, y)
-        backend.check_point(x, y)
+    x, y = scroll_point(args, backend)
     notches = args.amount if args.direction == "up" else -args.amount
     with guarded(args, backend, "pointer"):
         seen = guard_seen(args, backend, (x, y) if x is not None else None)
@@ -3918,48 +3956,77 @@ def cmd_focus(args: argparse.Namespace) -> None:
     status("focus", **fields)
 
 
+class Settle:
+    """Tracks whether captures have matched each other for `quiet` seconds in a row."""
+
+    def __init__(self, quiet: float) -> None:
+        self.quiet = quiet
+        self.previous: list | None = None
+        self.since: float | None = None  # when the current run of matching captures began
+        self.last_at = 0.0
+        self.diff = 0.0
+
+    def feed(self, fp: list) -> bool:
+        now = _now()
+        if self.previous is not None:
+            self.diff = fingerprint_diff(self.previous, fp)
+            if self.diff <= STABLE_MAX:
+                if self.since is None:
+                    self.since = self.last_at
+            else:
+                self.since = None
+        self.previous, self.last_at = fp, now
+        return self.since is not None and now - self.since >= self.quiet
+
+
 def cmd_wait(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
     timeout = min(args.timeout, WAIT_MAX)
-    last = {"diff": 0.0}
+    quiet = min(args.quiet, timeout)  # never ask for more quiet than the time allowed
+    settle = Settle(quiet)
+    last = {"diff": 0.0, "changed": False}
+    if args.settle and args.changed is None:
+        raise CliError("--settle goes with --changed (--stable always waits for quiet)", code=2)
     if args.changed is not None:
         ref = load_reference(args.changed)
-        monitor, mode = ref.monitor, "changed"
+        monitor, mode = ref.monitor, "changed-then-stable" if args.settle else "changed"
         masks = ref.masks(known_pointer(backend, list_monitors(backend))[0])
         base = fingerprint(ref.image, masks=masks)
 
         def done(cap: Capture) -> bool:
-            last["diff"] = fingerprint_diff(base, fingerprint(cap.image, masks=masks))
-            return last["diff"] > CHANGED_MIN
+            if not last["changed"]:
+                last["diff"] = fingerprint_diff(base, fingerprint(cap.image, masks=masks))
+                last["changed"] = last["diff"] > CHANGED_MIN
+                if not (last["changed"] and args.settle):
+                    return last["changed"]
+            ready = settle.feed(fingerprint(cap.image))
+            last["diff"] = settle.diff
+            return ready
 
     else:
         monitor, mode = args.monitor, "stable"
-        previous: dict = {}
 
         def done(cap: Capture) -> bool:
-            current = fingerprint(cap.image)
-            before, previous["fp"] = previous.get("fp"), current
-            if before is None:
-                return False
-            last["diff"] = fingerprint_diff(before, current)
-            return last["diff"] <= STABLE_MAX
+            ready = settle.feed(fingerprint(cap.image))
+            last["diff"] = settle.diff
+            return ready
 
     # --changed captures the pointer the way the reference did, so a pointer at rest
     # matches itself; --stable compares captures with each other and leaves it out.
-    cursor = mode == "changed" and ref.cursor == "native"
+    cursor = args.changed is not None and ref.cursor == "native"
     cap, polls, elapsed, ok = poll_until(
         lambda: capture_screen(backend, monitor, cursor=cursor),
         done, timeout, args.interval, min_polls=2 if mode == "stable" else 1,
     )
     fields = dict(mode=mode, polls=polls, elapsed=round(elapsed, 1), diff=round(last["diff"], 3))
     if not ok:
-        if mode == "stable":
-            message = f"screen still changing after {timeout:g} s (last diff {last['diff']:.1%})"
-        else:
+        if mode == "changed" or not last["changed"] and mode != "stable":
             message = (
                 f"screen unchanged after {timeout:g} s ({last['diff']:.1%} differs, "
                 f"needs more than {CHANGED_MIN:.0%})"
             )
+        else:
+            message = f"screen still changing after {timeout:g} s (last diff {last['diff']:.1%})"
         raise CliError(message, **fields)
     shot = getattr(args, "shot", None)
     if shot is not None:  # the last capture is the screenshot, unless it covers another monitor
@@ -4039,6 +4106,7 @@ def cmd_run(args: argparse.Namespace) -> None:
     steps = load_steps(args)
     args.steps = [argv[0] for argv in steps]  # the log keeps only the command names
     prefix = ["--backend", args.backend] + (["--instant"] if getattr(args, "instant", False) else [])
+    parsed_steps: list[argparse.Namespace] = []
     for i, argv in enumerate(steps, 1):
         parsed, payload = parse_quiet(prefix + argv)
         if parsed is None:
@@ -4053,6 +4121,17 @@ def cmd_run(args: argparse.Namespace) -> None:
             raise CliError(f"step {i} ({argv[0]}): {problem}", code=2)
         if parsed.command in RUN_FORBIDDEN:
             raise CliError(f"step {i}: {parsed.command} can't be a step of run", code=2)
+        parsed_steps.append(parsed)
+    backends: dict[str, Backend] = {}
+    for i, parsed in enumerate(parsed_steps, 1):
+        def backend_for(name=parsed.backend):
+            if name not in backends:
+                backends[name] = get_backend(name)
+            return backends[name]
+        try:
+            precheck(parsed, backend_for)
+        except CliError as exc:
+            raise CliError(f"step {i} ({parsed.command}): {exc}", code=exc.code) from exc
 
     results: list[dict] = []
     failed: tuple[int, int, str] | None = None
@@ -4435,6 +4514,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--interval", type=_non_negative_float, default=0.5,
         help="seconds between captures (default 0.5; each capture also takes time)",
+    )
+    p.add_argument(
+        "--quiet", type=_non_negative_float, default=1.0,
+        help="seconds the screen must stay unchanged to count as stable (default 1)",
+    )
+    p.add_argument(
+        "--settle", action="store_true",
+        help="with --changed: after the change, also wait until the screen is stable",
     )
     p.add_argument("--monitor", default="all", help="--stable: all (default), primary, or an index")
     p.add_argument(

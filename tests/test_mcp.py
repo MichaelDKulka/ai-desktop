@@ -60,9 +60,12 @@ def test_action_tools_pass_seen_and_shot(monkeypatch):
     assert call("type", text="--force", seen="latest")[1:2] + call("type", text="hi", seen="latest")[-1:] == ["--text=--force", "--seen=latest"]
     assert call("hotkey", keys="ctrl+l", shot=True) == ["hotkey", "--keys", "ctrl+l", "--shot"]
     assert call("paste", text="x", shot=True)[-1] == "--shot"
-    assert call("wait") == ["wait", "--stable", "--timeout", "10.0"]
+    assert call("wait") == ["wait", "--stable", "--quiet", "1.0", "--timeout", "10.0"]
+    assert call("wait", changed="latest", settle=True, quiet=2) == [
+        "wait", "--changed=latest", "--settle", "--quiet", "2.0", "--timeout", "10.0",
+    ]
     assert call("wait", changed="latest", timeout=99, shot=True) == [
-        "wait", "--changed=latest", "--timeout", "30.0", "--shot",
+        "wait", "--changed=latest", "--quiet", "1.0", "--timeout", "30.0", "--shot",
     ]
     steps = [["click", "--x", "1", "--y", "2"], ["key", "--key", "enter"]]
     assert call("run", steps=steps) == ["run", "--steps", json.dumps(steps)]
