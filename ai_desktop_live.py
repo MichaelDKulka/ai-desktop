@@ -63,7 +63,7 @@ class HelperProcess:
         script = Path(AD.__file__).with_name("ai_desktop_helper.py")
         self.proc = subprocess.Popen(
             [python, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, env=AD.host_env(), start_new_session=True,
+            stderr=subprocess.DEVNULL, env=AD.host_env(), start_new_session=os.name == "posix",
         )
         self.lock = threading.Lock()
 
