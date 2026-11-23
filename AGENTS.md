@@ -86,7 +86,8 @@ ai-desktop doctor
   command to jump straight there.
 - Key names: `enter`, `tab`, `esc`, `space`, `backspace`, `delete`, `up`, `down`, `left`,
   `right`, `home`, `end`, `pageup`, `pagedown`, `f1`–`f12`, `ctrl`, `shift`, `alt`, `cmd`
-  (same as `win`). Combine with `+`: `hotkey --keys ctrl+shift+t`.
+  (same as `win`). Combine with `+`: `hotkey --keys ctrl+shift+t`. Letter case doesn't add
+  shift in a combination: `Ctrl+C` is ctrl+c; write `shift` when you mean it.
 - On macOS the copy shortcut is `cmd+c`; on Windows and Linux it is `ctrl+c`. The `copy`
   and `paste` commands pick the right one for you.
 

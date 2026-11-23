@@ -21,7 +21,7 @@ def test_drag_presses_moves_and_releases(run, fake_gui):
     assert fake_gui.calls == [
         ("moveTo", (100, 200), {}),
         ("mouseDown", (), {"button": "left"}),
-        ("moveTo", (500, 600), {"duration": 0.2}),
+        ("dragTo", (500, 600), {"duration": 0.2, "button": "left", "mouseDownUp": False}),
         ("mouseUp", (), {"button": "left"}),
     ]
 
@@ -35,17 +35,16 @@ def test_drag_glides_to_the_start_point_first(run, fake_gui):
     assert arrive == ("moveTo", (900, 500), {})
     # With the button held the pointer goes straight to the end, not along a curve.
     assert fake_gui.calls[down + 1:] == [
-        ("moveTo", (1200, 700), {"duration": 0.5}),
+        ("dragTo", (1200, 700), {"duration": 0.5, "button": "left", "mouseDownUp": False}),
         ("mouseUp", (), {"button": "left"}),
     ]
 
 
 def test_drag_releases_even_if_the_move_fails(fake_gui):
     def boom(*args, **kwargs):
-        if "duration" in kwargs:
-            raise fake_gui.FailSafeException("corner")
+        raise fake_gui.FailSafeException("corner")
 
-    fake_gui.moveTo = boom
+    fake_gui.dragTo = boom
     backend = ad.get_backend("pyautogui")
     with pytest.raises(fake_gui.FailSafeException):
         backend.drag(1, 1, 50, 50, "right", 0.1)
@@ -63,7 +62,7 @@ def test_drag_default_duration_and_button(run, fake_gui):
         "drag", "--x1", "10", "--y1", "10", "--x2", "20", "--y2", "20", "--button", "middle", "--instant"
     )
     assert code == 0
-    assert fake_gui.calls[2] == ("moveTo", (20, 20), {"duration": 0.5})
+    assert fake_gui.calls[2] == ("dragTo", (20, 20), {"duration": 0.5, "button": "middle", "mouseDownUp": False})
     assert fake_gui.calls[1] == ("mouseDown", (), {"button": "middle"})
 
 
@@ -94,7 +93,7 @@ def test_drag_relative_to_monitor(run, fake_gui, two_monitors):
     )
     assert code == 0
     assert fake_gui.calls[0] == ("moveTo", (-1910, 20), {})
-    assert fake_gui.calls[2] == ("moveTo", (-920, 500), {"duration": 0.5})
+    assert fake_gui.calls[2] == ("dragTo", (-920, 500), {"duration": 0.5, "button": "left", "mouseDownUp": False})
 
 
 def test_scroll_relative_to_monitor(run, fake_gui, two_monitors):
@@ -153,3 +152,33 @@ def test_mcp_drag_and_monitor_argv(monkeypatch):
     assert calls[2] == ["move", "--x", "7", "--y", "8"]
     assert calls[3][-1] == "--monitor=0"
     assert calls[4][-3:] == ["--instant", "--seen=latest", "--shot"]
+
+def test_drag_release_bypasses_the_failsafe(fake_gui):
+    # A failsafe abort leaves the pointer in the corner, and pyautogui's mouseUp checks the
+    # failsafe first, so a plain mouseUp would raise again and leave the button held.
+    fake_gui.FAILSAFE = True
+    seen_during_release = []
+
+    def corner_drag(*args, **kwargs):
+        raise fake_gui.FailSafeException("corner")
+
+    def mouse_up(**kwargs):
+        if fake_gui.FAILSAFE:
+            raise fake_gui.FailSafeException("still in the corner")
+        seen_during_release.append(kwargs)
+
+    fake_gui.dragTo = corner_drag
+    fake_gui.mouseUp = mouse_up
+    backend = ad.get_backend("pyautogui")
+    with pytest.raises(fake_gui.FailSafeException):
+        backend.drag(1, 1, 50, 50, "left", 0.1)
+    assert seen_during_release == [{"button": "left"}]
+    assert fake_gui.FAILSAFE is True  # restored
+
+
+def test_scroll_moves_to_the_target_first(run, fake_gui):
+    # On Windows pyautogui.scroll ignores x and y, so the pointer must be put there first.
+    code, _, _ = run("scroll", "--x", "700", "--y", "400", "--instant")
+    assert code == 0
+    assert fake_gui.calls[-2] == ("moveTo", (700, 400), {})
+    assert fake_gui.calls[-1][0] == "scroll"

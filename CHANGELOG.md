@@ -19,6 +19,14 @@
 - **The right monitor is primary on multi-monitor Linux.** In `xrandr --listmonitors` the
   primary is marked `*`; `+` (read as primary until now) is on every automatic monitor,
   so index 0 and `--monitor primary` were simply the top-left monitor.
+- **A capital letter in a hotkey no longer adds Shift.** `hotkey --keys Ctrl+C` sent
+  Ctrl+Shift+C (Chrome's inspector) and `Ctrl+W` closed the whole window. With ctrl, alt
+  or cmd in the combination, letters are taken as lower case; write `shift` to add it.
+- **pyautogui drags.** A drag aborted by the corner failsafe left the mouse button held
+  (pyautogui's `mouseUp` checks the failsafe first and raised again); the release now
+  bypasses it. The held move uses `dragTo`, which macOS needs to send drag events.
+- **`scroll --x --y` on Windows** moves the pointer there first; pyautogui's Windows scroll
+  ignores the coordinates, so the pane under the old pointer position scrolled.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

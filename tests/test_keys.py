@@ -77,3 +77,14 @@ def test_uinput_resolve_key():
     assert backend.resolve_key("A") == (30, True)
     with pytest.raises(ad.CliError, match="unknown key"):
         backend.resolve_key("bogus")
+
+
+@pytest.mark.parametrize("given,sent", [
+    ("Ctrl+C", ("ctrl", "c")), ("ctrl+W", ("ctrl", "w")), ("Alt+F", ("alt", "f")),
+    ("ctrl+shift+T", ("ctrl", "shift", "t")), ("cmd+V", ("win", "v")),
+])
+def test_capital_letters_in_hotkeys_do_not_add_shift(run, fake_gui, given, sent):
+    # A capital letter means shift+letter when typed, but "Ctrl+C" means copy, not
+    # Ctrl+Shift+C (the inspector in Chrome); "Ctrl+W" must close a tab, not the window.
+    code, _, _ = run("hotkey", "--keys", given)
+    assert code == 0 and fake_gui.calls[-1][1] == sent

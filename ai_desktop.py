@@ -1460,9 +1460,21 @@ class PyAutoGuiBackend(Backend):
         self.gui.moveTo(x1, y1)
         self.gui.mouseDown(button=button)
         try:
-            self.gui.moveTo(x2, y2, duration=duration)
+            # dragTo, not moveTo: on macOS a move with the button held must be sent as
+            # drag events, or windows, sliders and selections don't follow.
+            self.gui.dragTo(x2, y2, duration=duration, button=button, mouseDownUp=False)
         finally:
+            self._release(button)
+
+    def _release(self, button: str) -> None:
+        # After a failsafe abort the pointer is still in the corner, and mouseUp runs the
+        # failsafe check first: it would raise again and leave the button held down.
+        saved = self.gui.FAILSAFE
+        self.gui.FAILSAFE = False
+        try:
             self.gui.mouseUp(button=button)
+        finally:
+            self.gui.FAILSAFE = saved
 
     def type_text(self, text: str, interval: float) -> None:
         if not HUMAN_INPUT:
@@ -1484,6 +1496,7 @@ class PyAutoGuiBackend(Backend):
         clicks = notches * 120 if sys.platform == "win32" else notches
         if x is not None and y is not None:
             self._glide(x, y)
+            self.gui.moveTo(x, y)  # on Windows pyautogui.scroll ignores x and y
         self.gui.scroll(clicks, x=x, y=y)
 
 
@@ -3437,8 +3450,14 @@ def cmd_hotkey(args: argparse.Namespace) -> None:
     names = args.keys.split("+")
     if any(not n.strip() for n in names):
         raise CliError(f"bad hotkey {args.keys!r}; use names joined by '+', e.g. ctrl+shift+t")
+    names = [n.strip() for n in names]
+    # A single capital letter means shift+letter (for `key` and typing), but in a
+    # combination "Ctrl+C" means ctrl+c: Ctrl+Shift+C would open Chrome's inspector and
+    # Ctrl+Shift+W close the whole window. An explicit "shift" still adds shift.
+    if any(normalize_key(n) in ("ctrl", "alt", "meta") for n in names):
+        names = [n.lower() if len(n) == 1 else n for n in names]
     backend = get_backend(args.backend)
-    keys = [backend.resolve_key(n.strip()) for n in names]
+    keys = [backend.resolve_key(n) for n in names]
     seen = guard_seen(args, backend)
     backend.hotkey(keys)
     finish(args, "hotkey", backend, keys=args.keys, **seen)
