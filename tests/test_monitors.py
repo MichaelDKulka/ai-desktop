@@ -7,14 +7,15 @@ from PIL import Image
 import ai_desktop as ad
 
 ONE = " 0: +*eDP-1 1366/340x768/190+0+0  eDP-1\n"
+# Real `xrandr --listmonitors` output: "+" marks every automatic monitor, "*" the primary.
 TWO = (
     "Monitors: 2\n"
-    " 0: +HDMI-1 1920/530x1080/300+1366+0  HDMI-1\n"
-    " 1: *eDP-1 1366/340x768/190+0+0  eDP-1\n"
+    " 0: +*HDMI-1 1920/530x1080/300+1366+0  HDMI-1\n"
+    " 1: +eDP-1 1366/340x768/190+0+0  eDP-1\n"
 )
 NEG = (
     " 0: +*DP-1 2560/600x1440/340+0+0  DP-1\n"
-    " 1: HDMI-1 1920/530x1080/300+-1920+180  HDMI-1\n"
+    " 1: +HDMI-1 1920/530x1080/300+-1920+180  HDMI-1\n"
 )
 
 
@@ -209,3 +210,17 @@ def test_screenshot_reports_origin_and_monitor(run, fake_gui, monkeypatch):
 def test_position_reports_the_monitor(run, fake_gui):
     _, out, _ = run("position")
     assert "x=10 y=20 monitor=0 " in out
+
+
+def test_primary_is_the_star_not_the_plus():
+    # Every monitor carries "+" (automatic); only the primary has "*". Reading "+" as
+    # primary made every monitor primary, so index 0 became simply the top-left one.
+    text = (
+        "Monitors: 2\n"
+        " 0: +HDMI-1 1920/531x1080/299+0+0  HDMI-1\n"
+        " 1: +*eDP-1 1920/344x1080/194+1920+0  eDP-1\n"
+    )
+    found = ad.parse_xrandr_monitors(text)
+    assert [(m.name, m.primary) for m in found] == [("HDMI-1", False), ("eDP-1", True)]
+    ordered = ad.order_monitors(found)
+    assert ordered[0].name == "eDP-1" and ordered[0].primary and not ordered[1].primary

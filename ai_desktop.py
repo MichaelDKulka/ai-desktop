@@ -577,13 +577,14 @@ XRANDR_MONITOR_RE = re.compile(r"^\s*\d+:\s*([+*]*)(\S+)\s+(\d+)/\d+x(\d+)/\d+\+
 
 
 def parse_xrandr_monitors(text: str) -> list[Monitor]:
-    """Parse `xrandr --listmonitors` output; a `+` before the name marks the primary."""
+    """Parse `xrandr --listmonitors` output. Before the name, `*` marks the primary;
+    `+` only means the monitor is automatic, and every normal monitor has it."""
     found = []
     for line in text.splitlines():
         match = XRANDR_MONITOR_RE.match(line)
         if match:
             flags, name, width, height, x, y = match.groups()
-            found.append(Monitor(0, name, int(x), int(y), int(width), int(height), "+" in flags, 1.0))
+            found.append(Monitor(0, name, int(x), int(y), int(width), int(height), "*" in flags, 1.0))
     return found
 
 

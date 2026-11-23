@@ -170,3 +170,30 @@ def test_negative_zoom_points_and_dash_text_reach_the_cli_intact(monkeypatch):
     asyncio.run(mcp.call_tool("paste", {"text": "-x y"}))
     assert seen[-1][0].text == "-x y"
     monkeypatch.setattr(ad, "execute", real)
+
+
+@pytest.mark.parametrize("text", ["null", "123", "true", '{"a": 1}', "[1, 2]", "hello"])
+def test_text_that_looks_like_json_is_passed_as_text(monkeypatch, text):
+    # The SDK JSON-decodes arguments not typed as plain str: "null" became None, so
+    # paste pasted the old clipboard, and '[1, 2]' was rejected.
+    import asyncio
+
+    import ai_desktop_mcp as server
+
+    calls = []
+    monkeypatch.setattr(server, "run", lambda argv: calls.append(argv) or {"ok": True})
+    mcp = server.build_server()
+
+    async def work():
+        await mcp.call_tool("paste", {"text": text})
+        await mcp.call_tool("paste", {})
+        await mcp.call_tool("focus", {"title": text})
+        await mcp.call_tool("launch_chrome", {"url": text})
+        await mcp.call_tool("key", {"key": "enter", "seen": text})
+
+    asyncio.run(work())
+    assert calls[0] == ["paste", f"--text={text}"]
+    assert calls[1] == ["paste"]
+    assert calls[2] == ["focus", f"--title={text}"]
+    assert calls[3] == ["launch-chrome", f"--url={text}"]
+    assert calls[4] == ["key", "--key", "enter", f"--seen={text}"]

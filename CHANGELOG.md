@@ -12,6 +12,13 @@
   only refused when more than 10% of the screen changed, so a 600x300 dialog on a
   1920x1080 screen (8.7%) passed and got the keystroke. Any connected changed area of at
   least 200x150 px now refuses too, with its `region` in the error; toasts still pass.
+- **MCP: text that looks like JSON is passed as text.** The SDK JSON-decodes arguments that
+  aren't typed plain `str`, so `paste(text="null")` pasted whatever was already on the
+  clipboard and `paste(text="[1, 2]")` was rejected. Optional text parameters are now plain
+  `str`, where an empty string means "not given".
+- **The right monitor is primary on multi-monitor Linux.** In `xrandr --listmonitors` the
+  primary is marked `*`; `+` (read as primary until now) is on every automatic monitor,
+  so index 0 and `--monitor primary` were simply the top-left monitor.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

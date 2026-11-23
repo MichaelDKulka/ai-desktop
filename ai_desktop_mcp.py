@@ -81,8 +81,10 @@ def dumps(payload: dict[str, Any]) -> str:
 
 def _opt(flag: str, value: Any) -> list[str]:
     # One token, so a value that starts with "-" (text, or a zoom point left of the
-    # primary monitor such as -1500,300) isn't mistaken for an option.
-    return [] if value is None else [f"{flag}={value}"]
+    # primary monitor such as -1500,300) isn't mistaken for an option. An empty string
+    # means "not given": optional text parameters are typed plain str, not str | None,
+    # because the SDK JSON-decodes anything else (text "null" would become None).
+    return [] if value is None or value == "" else [f"{flag}={value}"]
 
 
 def _instant(flag: bool) -> list[str]:
@@ -118,7 +120,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         spacing: int | None = None,
         monitor: str = "all",
         max_width: int | None = None,
-        zoom: str | None = None,
+        zoom: str = "",
         cursor: str = "auto",
     ) -> list:
         """Capture the screen (all monitors by default) with a labelled coordinate grid.
@@ -144,9 +146,9 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         y: int,
         button: str = "left",
         double: bool = False,
-        monitor: str | None = None,
+        monitor: str = "",
         instant: bool = False,
-        seen: str | None = None,
+        seen: str = "",
         shot: bool = False,
     ) -> list:
         """Click at a screen coordinate (button: left, right or middle).
@@ -164,9 +166,9 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
     def move(
         x: int,
         y: int,
-        monitor: str | None = None,
+        monitor: str = "",
         instant: bool = False,
-        seen: str | None = None,
+        seen: str = "",
         shot: bool = False,
     ) -> list:
         """Move the mouse to a screen coordinate without clicking.
@@ -184,9 +186,9 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         y2: int,
         button: str = "left",
         duration: float = 0.5,
-        monitor: str | None = None,
+        monitor: str = "",
         instant: bool = False,
-        seen: str | None = None,
+        seen: str = "",
         shot: bool = False,
     ) -> list:
         """Press `button` at (x1, y1), move to (x2, y2) over `duration` seconds, release.
@@ -202,7 +204,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
 
     @tool(ACTION, name="type")
     def type_text(
-        text: str, interval: float = 0.02, instant: bool = False, seen: str | None = None, shot: bool = False
+        text: str, interval: float = 0.02, instant: bool = False, seen: str = "", shot: bool = False
     ) -> list:
         """Type printable ASCII text into the focused window. For other characters use paste.
 
@@ -214,13 +216,13 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION)
-    def key(key: str, seen: str | None = None, shot: bool = False) -> list:
+    def key(key: str, seen: str = "", shot: bool = False) -> list:
         """Press one key: enter, tab, esc, space, backspace, delete, arrows, home, end,
         pageup, pagedown, f1-f12, or a single character. seen and shot work as for type."""
         return _with_shot(run(["key", "--key", key] + _acting(seen, shot)))
 
     @tool(ACTION)
-    def hotkey(keys: str, seen: str | None = None, shot: bool = False) -> list:
+    def hotkey(keys: str, seen: str = "", shot: bool = False) -> list:
         """Press a combination joined with '+', e.g. ctrl+c, cmd+t, alt+tab, ctrl+shift+t.
         seen and shot work as for type."""
         return _with_shot(run(["hotkey", "--keys", keys] + _acting(seen, shot)))
@@ -231,9 +233,9 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         amount: int = 3,
         x: int | None = None,
         y: int | None = None,
-        monitor: str | None = None,
+        monitor: str = "",
         instant: bool = False,
-        seen: str | None = None,
+        seen: str = "",
         shot: bool = False,
     ) -> list:
         """Scroll the mouse wheel `amount` notches up or down, optionally after moving to (x, y).
@@ -247,7 +249,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
 
     @tool(READ_ONLY)
     def wait(
-        stable: bool = True, changed: str | None = None, timeout: float = 10.0, shot: bool = False
+        stable: bool = True, changed: str = "", timeout: float = 10.0, shot: bool = False
     ) -> list:
         """Wait until the screen stops changing (default), or until it differs from the
         screenshot `changed` ("latest" or a path). Fails after `timeout` seconds (at most
@@ -271,7 +273,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         return dumps(run(["copy"]))
 
     @tool(ACTION)
-    def paste(text: str | None = None, seen: str | None = None, shot: bool = False) -> list:
+    def paste(text: str = "", seen: str = "", shot: bool = False) -> list:
         """Press the paste shortcut; with `text`, put it on the clipboard first (any
         characters). seen and shot work as for type."""
         return _with_shot(run(["paste"] + _opt("--text", text) + _acting(seen, shot)))
@@ -292,7 +294,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         return dumps(run(["position"]))
 
     @tool(ACTION)
-    def launch_chrome(url: str | None = None, profile: str | None = None) -> str:
+    def launch_chrome(url: str = "", profile: str = "") -> str:
         """Open the user's own signed-in Google Chrome, optionally at a URL or with a
         profile directory such as "Profile 1". Take a screenshot afterwards."""
         return dumps(run(["launch-chrome"] + _opt("--url", url) + _opt("--profile", profile)))
@@ -304,7 +306,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
 
     @tool(ACTION)
     def focus(
-        title: str | None = None, app: str | None = None, pid: int | None = None, id: str | None = None
+        title: str = "", app: str = "", pid: int | None = None, id: str = ""
     ) -> str:
         """Bring a window to the front by a part of its title (or app name), app, pid or id."""
         argv = ["focus"] + _opt("--title", title) + _opt("--app", app) + _opt("--pid", pid) + _opt("--id", id)
