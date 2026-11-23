@@ -182,6 +182,13 @@
 - **`run` command strings are split the same way on every OS.** On Windows a quote inside a
   word (`it's`) used to be an ordinary character and `--text="a b"` became two arguments;
   now only the backslash escape is off there, so paths keep their backslashes.
+- **CI and releases.** CI covers Python 3.10 and 3.14 on all three systems and 3.9 on
+  Ubuntu 24.04 and macOS, lints, and fails below 80% test coverage; the live checks
+  (screenshots on Windows and macOS, a real move and screenshot under Xvfb on Linux) now
+  fail the build instead of being informational. A release runs the whole CI first, then
+  checks the metadata and installs the built wheel before publishing. The test suite has a
+  tripwire: opening `/dev/uinput`, running a desktop program or grabbing the real screen
+  fails the test.
 - **Packaging.** The version is written only in `__version__` (`pyproject.toml` reads it, and
   the release workflow checks the tag against it); `main` carries `.dev0` between releases.
   The sdist now ships `tests/conftest.py`: without it the store tests ran against the real

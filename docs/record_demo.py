@@ -7,7 +7,6 @@ All input to the editor comes from the ai-desktop CLI.
 """
 from __future__ import annotations
 
-import ctypes
 import subprocess
 import sys
 import threading

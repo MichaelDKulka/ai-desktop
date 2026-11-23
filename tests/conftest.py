@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import random
+import subprocess
 import sys
 import types
 
@@ -40,6 +41,52 @@ def isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(ai_desktop, "HUMAN_INPUT", True)
     monkeypatch.setattr(ai_desktop, "MAX_WIDTH_OVERRIDE", None)
     monkeypatch.setattr(ai_desktop, "_LAST_CAPTURE_TOOL", None)
+
+
+# Programs that would touch the real desktop, clipboard or browser.
+DESKTOP_PROGRAMS = {
+    "gnome-screenshot", "grim", "spectacle", "screencapture", "xclip", "xsel", "wl-copy",
+    "wl-paste", "pbcopy", "pbpaste", "powershell", "powershell.exe", "xrandr", "gtk-launch",
+    "gio", "osascript", "open", "google-chrome", "google-chrome-stable", "chromium",
+    "chromium-browser", "xdotool", "ydotool", "tesseract", "gdbus", "busctl",
+}
+
+
+def _program(argv):
+    first = argv[0] if isinstance(argv, (list, tuple)) and argv else argv
+    return os.path.basename(str(first))
+
+
+@pytest.fixture(autouse=True)
+def tripwire(monkeypatch):
+    """Fail any test that would reach the real desktop: the uinput device, a desktop
+    program, a real screen grab or the real pyautogui. Tests replace these with fakes
+    (monkeypatch after this fixture wins), and fake_gui supplies pyautogui."""
+    real_open, real_run, real_popen = os.open, subprocess.run, subprocess.Popen
+
+    def guarded_open(path, *args, **kwargs):
+        if str(path) == "/dev/uinput":
+            raise AssertionError("a test tried to open the real /dev/uinput")
+        return real_open(path, *args, **kwargs)
+
+    def guarded_run(argv, *args, **kwargs):
+        if _program(argv) in DESKTOP_PROGRAMS:
+            raise AssertionError(f"a test tried to run the real {_program(argv)}")
+        return real_run(argv, *args, **kwargs)
+
+    def guarded_popen(argv, *args, **kwargs):
+        if _program(argv) in DESKTOP_PROGRAMS:
+            raise AssertionError(f"a test tried to start the real {_program(argv)}")
+        return real_popen(argv, *args, **kwargs)
+
+    def no_grab(*args, **kwargs):
+        raise AssertionError("a test tried to grab the real screen")
+
+    monkeypatch.setattr(ai_desktop.os, "open", guarded_open)
+    monkeypatch.setattr(ai_desktop.subprocess, "run", guarded_run)
+    monkeypatch.setattr(ai_desktop.subprocess, "Popen", guarded_popen)
+    monkeypatch.setattr(ai_desktop.ImageGrab, "grab", no_grab)
+    monkeypatch.setitem(sys.modules, "pyautogui", None)  # import fails unless fake_gui is used
 
 
 @pytest.fixture(autouse=True)

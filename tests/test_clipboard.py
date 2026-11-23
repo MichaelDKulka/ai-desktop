@@ -93,7 +93,7 @@ def test_a_failing_key_press_restores_the_clipboard(run, backend, monkeypatch):
 
 
 def test_copy_does_not_touch_the_clipboard_when_the_keyboard_is_missing(run, backend, monkeypatch):
-    clip = Clipboard(monkeypatch, copies="x")
+    Clipboard(monkeypatch, copies="x")  # fakes the clipboard reads
     touched = []
     monkeypatch.setattr(ad, "set_clipboard", lambda text: touched.append(text))
 

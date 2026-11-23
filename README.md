@@ -448,10 +448,11 @@ Wayland caveats:
 ```bash
 pip install -e ".[dev,mcp]"
 pytest                      # headless; never touches the real desktop
+ruff check --select E9,F .  # what CI lints
 ai-desktop doctor
 ```
 
-CI runs the tests and a CLI smoke test on Ubuntu, macOS and Windows with Python 3.9 and 3.12 (the MCP extra on 3.12 only), plus `monitors` and `windows` live on the macOS and Windows runners. The `doctor` and live-screenshot steps there are informational, because the runners have no desktop (Linux) or no permissions (macOS).
+CI lints, runs the tests with an 80% coverage floor and a CLI smoke test on Ubuntu, macOS and Windows with Python 3.10 and 3.14, plus 3.9 (without the MCP extra) on Ubuntu 24.04 and macOS. `monitors`, `windows` and screenshots run live on the macOS and Windows runners, and on Linux a real move, `position` and screenshot run under Xvfb; all of these must pass. Only `doctor` is informational, since the runners lack some permissions. The test suite refuses to open `/dev/uinput`, run desktop programs (screenshot tools, clipboard tools, Chrome launchers) or grab the real screen, so a test that forgets a fake fails instead of touching your desktop. The release workflow runs the whole CI first, checks the tag against `__version__`, checks the package metadata and installs the built wheel before publishing.
 
 Rule for contributors: nothing may print to stdout except through `status()` / `fail()`, because under `ai-desktop mcp` stdout is the protocol channel. Every subprocess the tool starts captures or discards its output.
 

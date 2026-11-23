@@ -4,22 +4,26 @@ on:
   push:
     branches: [main]
   pull_request:
+  # The release workflow runs this first and publishes only if every row passes.
+  workflow_call:
 
 jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.9", "3.12"]
-        # ubuntu-latest is now Ubuntu 26.04, which setup-python has no Python 3.9 for.
-        exclude:
-          - os: ubuntu-latest
-            python: "3.9"
+        # The oldest and newest Python the MCP extra supports; the core still runs on 3.9.
+        python: ["3.10", "3.14"]
         include:
+          # 3.9 is end-of-life but is still the system python3 on macOS. ubuntu-latest is
+          # Ubuntu 26.04, which setup-python has no 3.9 for.
           - os: ubuntu-24.04
+            python: "3.9"
+          - os: macos-latest
             python: "3.9"
     defaults:
       run:
@@ -31,17 +35,20 @@ jobs:
           python-version: ${{ matrix.python }}
 
       # Proves the dependencies resolve and install on this OS (pyobjc on macOS, Xlib on Linux).
-      # The MCP extra needs Python 3.10+, so only the 3.12 rows install and test it.
+      # The MCP extra needs Python 3.10+, so the 3.9 rows install and test without it.
       - name: Install
         run: |
-          if [ "${{ matrix.python }}" = "3.12" ]; then
-            python -m pip install -e ".[dev,mcp]"
-          else
+          if [ "${{ matrix.python }}" = "3.9" ]; then
             python -m pip install -e ".[dev]"
+          else
+            python -m pip install -e ".[dev,mcp]"
           fi
 
-      - name: Unit tests (headless)
-        run: pytest -q
+      - name: Lint (syntax errors and undefined or unused names)
+        run: ruff check --select E9,F .
+
+      - name: Unit tests (headless) with coverage
+        run: pytest -q --cov=ai_desktop --cov=ai_desktop_mcp --cov-report=term --cov-fail-under=80
 
       - name: CLI smoke test (no display needed)
         run: |
@@ -56,37 +63,35 @@ jobs:
           ai-desktop screenshots clean --all
 
       # These need a desktop but no permissions, so they must pass on the mac/windows runners.
-      - name: Monitors and windows (live desktop)
+      - name: Monitors, windows and screenshots (live desktop)
         if: runner.os != 'Linux'
         run: |
           ai-desktop monitors
           ai-desktop --json monitors | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'] and d['count'] >= 1, d"
           ai-desktop windows
           ai-desktop --json windows | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'], d"
+          ai-desktop --json screenshot --grid | python -c "import json, sys; d = json.load(sys.stdin); assert d['ok'] and d['width'] > 0, d"
+          ai-desktop screenshot --monitor primary
+          ai-desktop screenshots list
+          ai-desktop log --limit 5
 
       # Informational: runners have no desktop (Linux) or no permissions (macOS), so some rows fail.
       - name: Doctor
         run: ai-desktop doctor
         continue-on-error: true
 
-      - name: Live screenshot (macOS and Windows runners have a desktop)
-        if: runner.os != 'Linux'
-        run: |
-          ai-desktop screenshot --grid
-          ai-desktop screenshot --monitor all --grid
-          ai-desktop screenshot --monitor primary
-          ai-desktop screenshots list
-          ai-desktop log --limit 5
-        continue-on-error: true
-
-      - name: Live X11 smoke test under Xvfb
+      # One X server for the whole sequence, so the move can be checked with position.
+      - name: Live X11 test under Xvfb
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb
-          xvfb-run -a ai-desktop position
-          xvfb-run -a ai-desktop monitors
-          xvfb-run -a ai-desktop windows
-          xvfb-run -a ai-desktop move --x 10 --y 10
-          xvfb-run -a ai-desktop screenshot --grid
-        continue-on-error: true
+          xvfb-run -a bash -euo pipefail -c '
+            ai-desktop monitors
+            ai-desktop windows
+            ai-desktop --instant move --x 10 --y 10
+            ai-desktop --json position | python -c "import json, sys; d = json.load(sys.stdin); assert (d[\"x\"], d[\"y\"]) == (10, 10), d"
+            ai-desktop move --x 300 --y 200
+            ai-desktop --json position | python -c "import json, sys; d = json.load(sys.stdin); assert (d[\"x\"], d[\"y\"]) == (300, 200), d"
+            ai-desktop --json screenshot --grid | python -c "import json, sys; d = json.load(sys.stdin); assert d[\"ok\"] and d[\"width\"] > 0, d"
+          '

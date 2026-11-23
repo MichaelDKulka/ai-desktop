@@ -266,8 +266,6 @@ def test_a_cancelled_call_stops_at_its_next_pause(monkeypatch):
 
 
 def test_a_call_cancelled_while_queued_never_runs(monkeypatch):
-    import threading
-
     import anyio
 
     import ai_desktop_mcp as server

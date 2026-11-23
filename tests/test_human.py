@@ -336,6 +336,7 @@ def test_uinput_moves_are_one_frame_each(uinput):
     assert all(abs(x - y) <= 1 for x, y in held)  # on the diagonal, not a staircase
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="uinput is Linux only")
 def test_real_uinput_device_setup_and_events(monkeypatch):
     """The real _UInputDevice, with the kernel calls recorded instead of made."""
     import types as _types
