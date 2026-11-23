@@ -1,3 +1,5 @@
+import sys
+
 import pytest
 
 import ai_desktop as ad
@@ -86,5 +88,7 @@ def test_uinput_resolve_key():
 def test_capital_letters_in_hotkeys_do_not_add_shift(run, fake_gui, given, sent):
     # A capital letter means shift+letter when typed, but "Ctrl+C" means copy, not
     # Ctrl+Shift+C (the inspector in Chrome); "Ctrl+W" must close a tab, not the window.
+    if sys.platform == "darwin":  # cmd is "command" there, "win" elsewhere
+        sent = tuple("command" if k == "win" else k for k in sent)
     code, _, _ = run("hotkey", "--keys", given)
     assert code == 0 and fake_gui.calls[-1][1] == sent

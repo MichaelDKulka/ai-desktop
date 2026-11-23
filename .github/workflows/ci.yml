@@ -81,12 +81,14 @@ jobs:
         continue-on-error: true
 
       # One X server for the whole sequence, so the move can be checked with position.
+      # -noreset: an X server resets when its last client disconnects (between two
+      # commands here), which would put the pointer back in the middle.
       - name: Live X11 test under Xvfb
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -q
           sudo apt-get install -y -q xvfb
-          xvfb-run -a bash -euo pipefail -c '
+          xvfb-run -a -s "-screen 0 1280x1024x24 -noreset" bash -euo pipefail -c '
             ai-desktop monitors
             ai-desktop windows
             ai-desktop --instant move --x 10 --y 10
