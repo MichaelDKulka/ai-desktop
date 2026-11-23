@@ -8,12 +8,14 @@ that is the MCP transport.
 from __future__ import annotations
 
 import contextlib
+import io
 import json
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
+import anyio
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.types import ToolAnnotations
 
@@ -57,22 +59,57 @@ class CommandError(ToolError):
     """A failed command; the SDK reports the message to the client as a tool error."""
 
 
+# The cancel token of the call running on this worker thread (see _run).
+_CALL = threading.local()
+
+
 def run_raw(argv: list[str]) -> tuple[int, dict[str, Any]]:
     """Run one CLI command in-process; returns (exit code, payload) without raising."""
+    token = getattr(_CALL, "token", None)
     with _LOCK, contextlib.redirect_stdout(sys.stderr):
+        if token is not None and token.is_set():  # cancelled while it waited its turn
+            return 130, {"ok": False, "command": argv[0] if argv else None,
+                         "error": "cancelled by the client before it started", "code": 130}
         ai_desktop.LOG_VIA = "mcp"  # under the lock: a running `run` has set it to mcp/run
-        code, payload = ai_desktop.execute(argv, quiet=True)
+        ai_desktop.CANCEL = token
+        try:
+            code, payload = ai_desktop.execute(argv, quiet=True)
+        finally:
+            ai_desktop.CANCEL = None
     if payload is None:
         payload = {"ok": code == 0, "command": argv[0] if argv else None, "code": code}
     return code, payload
 
 
 def run(argv: list[str]) -> dict[str, Any]:
-    """Run one CLI command and return its payload; a failure becomes a tool error."""
+    """Run one CLI command and return its payload. A failure becomes a tool error whose
+    text is the whole JSON payload, so fields such as the finished steps of `run` or the
+    changed `region` of a --seen refusal reach the model too."""
     code, payload = run_raw(argv)
     if not payload.get("ok"):
-        raise CommandError(payload.get("error") or f"exit code {code}")
+        raise CommandError(dumps({**payload, "error": payload.get("error") or f"exit code {code}"}))
     return payload
+
+
+async def _run(argv: list[str], fn=None) -> Any:
+    """Run a command on a worker thread with its own cancel token. When the client
+    cancels (or times out), the token is set: the engine stops at its next pause, and a
+    call still waiting for the lock never starts."""
+    token = threading.Event()
+    target = fn or run
+
+    def work():
+        _CALL.token = token
+        try:
+            return target(argv)
+        finally:
+            _CALL.token = None
+
+    try:
+        return await anyio.to_thread.run_sync(work, abandon_on_cancel=True)
+    except anyio.get_cancelled_exc_class():
+        token.set()
+        raise
 
 
 def dumps(payload: dict[str, Any]) -> str:
@@ -95,14 +132,45 @@ def _acting(seen: str | None, shot: bool) -> list[str]:
     return _opt("--seen", seen) + (["--shot"] if shot else [])
 
 
-def _image(path: str) -> Image:
-    return Image(data=Path(path).read_bytes(), format="png")
+# Some clients reject tool results much over 1 MB, and a photo-heavy screen saved as PNG
+# easily exceeds that, so a big inline image is sent as JPEG (the file stays PNG).
+INLINE_MAX_BYTES = 900_000
+
+
+def _inline(path: str) -> tuple[Image, dict[str, Any]]:
+    """The screenshot at `path` as an inline image under INLINE_MAX_BYTES, and the fields
+    that say how it was sent when it isn't the saved PNG itself."""
+    data = Path(path).read_bytes()
+    if len(data) <= INLINE_MAX_BYTES:
+        return Image(data=data, format="png"), {}
+    from PIL import Image as PILImage
+
+    with PILImage.open(path) as opened:
+        img = opened.convert("RGB")
+    scale = 1.0
+    while True:
+        for quality in (85, 70, 55):
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=quality, optimize=True)
+            if buf.tell() <= INLINE_MAX_BYTES or quality == 55 and scale <= 0.4:
+                info = {"inline_format": "jpeg", "inline_quality": quality}
+                if scale < 1:
+                    info["inline_scale"] = round(scale, 3)
+                return Image(data=buf.getvalue(), format="jpeg"), info
+        scale *= 0.8
+        img = img.resize((max(1, round(img.width * 0.8)), max(1, round(img.height * 0.8))), PILImage.Resampling.LANCZOS)
+
+
+def _with_image(payload: dict[str, Any], path: str | None) -> list:
+    if not path or path == "error":
+        return [dumps(payload)]
+    image, info = _inline(path)
+    return [dumps({**payload, **info}), image]
 
 
 def _with_shot(payload: dict[str, Any]) -> list:
     """The payload as JSON, plus the --shot screenshot inline when one was taken."""
-    shot = payload.get("shot")
-    return [dumps(payload)] + ([_image(shot)] if shot and shot != "error" else [])
+    return _with_image(payload, payload.get("shot"))
 
 
 def build_server(default_max_width: int | None = None) -> MCPServer:
@@ -115,7 +183,7 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         return mcp.tool(annotations=annotations, structured_output=False, **kwargs)
 
     @tool(READ_ONLY)
-    def screenshot(
+    async def screenshot(
         grid: bool = True,
         spacing: int | None = None,
         monitor: str = "all",
@@ -137,11 +205,11 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         argv = ["screenshot", "--monitor", str(monitor)] + _opt("--max-width", limit)
         argv += (["--grid"] if grid else []) + _opt("--spacing", spacing) + _opt("--zoom", zoom)
         argv += [] if cursor == "auto" else ["--cursor", cursor]
-        payload = run(argv)
-        return [dumps(payload), _image(payload["path"])]
+        payload = await _run(argv)
+        return _with_image(payload, payload["path"])
 
     @tool(ACTION)
-    def click(
+    async def click(
         x: int,
         y: int,
         button: str = "left",
@@ -160,10 +228,10 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         returns a new screenshot taken right after the click."""
         argv = ["click", "--x", str(x), "--y", str(y), "--button", button] + _opt("--monitor", monitor)
         argv += (["--double"] if double else []) + _instant(instant) + _acting(seen, shot)
-        return _with_shot(run(argv))
+        return _with_shot(await _run(argv))
 
     @tool(ACTION)
-    def move(
+    async def move(
         x: int,
         y: int,
         monitor: str = "",
@@ -176,10 +244,10 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         The pointer travels there along a human-like path (up to 1.5 s); instant=True jumps
         straight there. monitor, seen and shot work as for click."""
         argv = ["move", "--x", str(x), "--y", str(y)] + _opt("--monitor", monitor)
-        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION)
-    def drag(
+    async def drag(
         x1: int,
         y1: int,
         x2: int,
@@ -200,10 +268,10 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         click."""
         argv = ["drag", "--x1", str(x1), "--y1", str(y1), "--x2", str(x2), "--y2", str(y2)]
         argv += ["--button", button, "--duration", str(duration)] + _opt("--monitor", monitor)
-        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION, name="type")
-    def type_text(
+    async def type_text(
         text: str, interval: float = 0.02, instant: bool = False, seen: str = "", shot: bool = False
     ) -> list:
         """Type printable ASCII text into the focused window. For other characters use paste.
@@ -213,22 +281,22 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         text, or instant=True to type at a fixed `interval`. seen="latest" aborts if the
         screen changed much since that screenshot; shot=true returns a new screenshot."""
         argv = ["type", f"--text={text}", "--interval", str(interval)]
-        return _with_shot(run(argv + _instant(instant) + _acting(seen, shot)))
+        return _with_shot(await _run(argv + _instant(instant) + _acting(seen, shot)))
 
     @tool(ACTION)
-    def key(key: str, seen: str = "", shot: bool = False) -> list:
+    async def key(key: str, seen: str = "", shot: bool = False) -> list:
         """Press one key: enter, tab, esc, space, backspace, delete, arrows, home, end,
         pageup, pagedown, f1-f12, or a single character. seen and shot work as for type."""
-        return _with_shot(run(["key", "--key", key] + _acting(seen, shot)))
+        return _with_shot(await _run(["key", "--key", key] + _acting(seen, shot)))
 
     @tool(ACTION)
-    def hotkey(keys: str, seen: str = "", shot: bool = False) -> list:
+    async def hotkey(keys: str, seen: str = "", shot: bool = False) -> list:
         """Press a combination joined with '+', e.g. ctrl+c, cmd+t, alt+tab, ctrl+shift+t.
         seen and shot work as for type."""
-        return _with_shot(run(["hotkey", "--keys", keys] + _acting(seen, shot)))
+        return _with_shot(await _run(["hotkey", "--keys", keys] + _acting(seen, shot)))
 
     @tool(ACTION)
-    def scroll(
+    async def scroll(
         direction: str = "down",
         amount: int = 3,
         x: int | None = None,
@@ -245,92 +313,94 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         argv = ["scroll", "--direction", direction, "--amount", str(amount)]
         argv += _opt("--x", x) + _opt("--y", y) + _opt("--monitor", monitor)
         argv += _instant(instant) + _acting(seen, shot)
-        return _with_shot(run(argv))
+        return _with_shot(await _run(argv))
 
     @tool(READ_ONLY)
-    def wait(
+    async def wait(
         stable: bool = True, changed: str = "", timeout: float = 10.0, shot: bool = False
     ) -> list:
         """Wait until the screen stops changing (default), or until it differs from the
         screenshot `changed` ("latest" or a path). Fails after `timeout` seconds (at most
         30 here). shot=true returns the final screen as a gridded screenshot."""
+        if not stable and not changed:
+            raise CommandError("give stable=true, or changed=\"latest\" (or a screenshot path)")
         argv = ["wait"] + (_opt("--changed", changed) if changed else ["--stable"])
         argv += ["--timeout", str(min(max(timeout, 0.0), 30.0))] + (["--shot"] if shot else [])
-        return _with_shot(run(argv))
+        return _with_shot(await _run(argv))
 
     @tool(ACTION, name="run")
-    def run_steps(steps: list[list[str]], shot: bool = False) -> list:
+    async def run_steps(steps: list[list[str]], shot: bool = False) -> list:
         """Run several commands in one call, stopping at the first failure. Each step is a
         CLI argument list, e.g. [["click","--x","500","--y","300"],["type","--text","hi"],
         ["key","--key","enter"]]. Faster than separate calls; shot=true returns a
         screenshot after the last step. Only for short sequences you are sure of: look at
         the screen before trusting the result."""
-        return _with_shot(run(["run", "--steps", json.dumps(steps)] + (["--shot"] if shot else [])))
+        return _with_shot(await _run(["run", "--steps", json.dumps(steps)] + (["--shot"] if shot else [])))
 
     @tool(ACTION)
-    def copy() -> str:
+    async def copy() -> str:
         """Press the copy shortcut and return the copied text (error if nothing was selected)."""
-        return dumps(run(["copy"]))
+        return dumps(await _run(["copy"]))
 
     @tool(ACTION)
-    def paste(text: str = "", seen: str = "", shot: bool = False) -> list:
+    async def paste(text: str = "", seen: str = "", shot: bool = False) -> list:
         """Press the paste shortcut; with `text`, put it on the clipboard first (any
         characters). seen and shot work as for type."""
-        return _with_shot(run(["paste"] + _opt("--text", text) + _acting(seen, shot)))
+        return _with_shot(await _run(["paste"] + _opt("--text", text) + _acting(seen, shot)))
 
     @tool(READ_ONLY)
-    def clipboard_get() -> str:
+    async def clipboard_get() -> str:
         """Read the clipboard text."""
-        return dumps(run(["clipboard", "get"]))
+        return dumps(await _run(["clipboard", "get"]))
 
     @tool(ACTION)
-    def clipboard_set(text: str) -> str:
+    async def clipboard_set(text: str) -> str:
         """Put text on the clipboard without pressing any keys."""
-        return dumps(run(["clipboard", "set"] + _opt("--text", text)))
+        return dumps(await _run(["clipboard", "set"] + _opt("--text", text)))
 
     @tool(READ_ONLY)
-    def position() -> str:
+    async def position() -> str:
         """Mouse position, which monitor it is on, and the primary screen size."""
-        return dumps(run(["position"]))
+        return dumps(await _run(["position"]))
 
     @tool(ACTION)
-    def launch_chrome(url: str = "", profile: str = "") -> str:
+    async def launch_chrome(url: str = "", profile: str = "") -> str:
         """Open the user's own signed-in Google Chrome, optionally at a URL or with a
         profile directory such as "Profile 1". Take a screenshot afterwards."""
-        return dumps(run(["launch-chrome"] + _opt("--url", url) + _opt("--profile", profile)))
+        return dumps(await _run(["launch-chrome"] + _opt("--url", url) + _opt("--profile", profile)))
 
     @tool(READ_ONLY)
-    def windows() -> str:
+    async def windows() -> str:
         """List open windows front-to-back with id, pid, app, title and global geometry."""
-        return dumps(run(["windows"]))
+        return dumps(await _run(["windows"]))
 
     @tool(ACTION)
-    def focus(
+    async def focus(
         title: str = "", app: str = "", pid: int | None = None, id: str = ""
     ) -> str:
         """Bring a window to the front by a part of its title (or app name), app, pid or id."""
         argv = ["focus"] + _opt("--title", title) + _opt("--app", app) + _opt("--pid", pid) + _opt("--id", id)
-        return dumps(run(argv))
+        return dumps(await _run(argv))
 
     @tool(READ_ONLY)
-    def monitors() -> str:
+    async def monitors() -> str:
         """List monitors with their global coordinates; index 0 is the primary."""
-        return dumps(run(["monitors"]))
+        return dumps(await _run(["monitors"]))
 
     @tool(READ_ONLY)
-    def doctor() -> str:
+    async def doctor() -> str:
         """Check what this platform still needs (permissions, tools); rows with hints."""
-        return dumps(run_raw(["doctor"])[1])
+        return dumps((await _run(["doctor"], fn=run_raw))[1])
 
     @tool(READ_ONLY)
-    def screenshots_latest() -> str:
+    async def screenshots_latest() -> str:
         """Path of the newest screenshot in the store."""
-        return dumps(run(["screenshots", "latest"]))
+        return dumps(await _run(["screenshots", "latest"]))
 
     @tool(READ_ONLY)
-    def log(limit: int = 20) -> str:
+    async def log(limit: int = 20) -> str:
         """Recent entries from the action log, newest first."""
-        return dumps(run(["log", "--limit", str(limit)]))
+        return dumps(await _run(["log", "--limit", str(limit)]))
 
     return mcp
 

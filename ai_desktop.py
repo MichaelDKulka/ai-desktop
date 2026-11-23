@@ -1299,8 +1299,20 @@ def is_stopped() -> bool:
     return stop_path().exists()
 
 
+# Set by the MCP server for the call it is running: a threading.Event the client's
+# cancellation sets, so the action stops at its next pause instead of finishing.
+CANCEL = None
+
+
+def check_cancel() -> None:
+    if CANCEL is not None and CANCEL.is_set():
+        raise CliError("cancelled by the client", code=130, cancelled=True)
+
+
 def check_stop() -> None:
-    """Abort (exit 3, like the failsafe) if the human has stopped ai-desktop."""
+    """Abort if the client cancelled the call (exit 130), or if the human has stopped
+    ai-desktop (exit 3, like the failsafe)."""
+    check_cancel()
     if is_stopped():
         raise CliError(STOP_MESSAGE, code=EXIT_FAILSAFE, stopped=True)
 
@@ -3433,6 +3445,7 @@ def poll_until(
             return cap, polls, _now() - start, True
         if polls >= min_polls and _now() >= deadline:
             return cap, polls, _now() - start, False
+        check_cancel()
         _sleep(min(interval, max(0.0, deadline - _now())))  # never sleep past the deadline
 
 

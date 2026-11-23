@@ -78,6 +78,16 @@
   macOS `--profile` works while Chrome is already running. The desktop entry is tried
   before the binary (a Flatpak Chrome has none on PATH), and a launcher that fails falls
   back to starting Chrome directly instead of reporting OK.
+- **MCP: cancelling a call stops it.** Tools ran on a worker thread the SDK can't stop, so a
+  cancelled or timed-out `type` kept typing and calls queued behind it still ran. Tools
+  are now async with a cancel token per call: the action stops at its next pause (exit
+  130, "cancelled by the client"), and a call cancelled while waiting its turn never starts.
+- **MCP: failures carry their payload.** A failed call's error is the whole JSON payload,
+  not just the message, so the finished steps of `run`, the `region` of a `--seen`
+  refusal and the like reach the model. `wait(stable=false)` without `changed` was
+  silently a `--stable` wait; it is now an error.
+- **MCP: inline images have a size budget.** Screenshots over about 900 KB as PNG go inline
+  as JPEG (smaller still if needed), since some clients reject results over 1 MB.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

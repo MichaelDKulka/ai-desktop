@@ -197,3 +197,122 @@ def test_text_that_looks_like_json_is_passed_as_text(monkeypatch, text):
     assert calls[2] == ["focus", f"--title={text}"]
     assert calls[3] == ["launch-chrome", f"--url={text}"]
     assert calls[4] == ["key", "--key", "enter", f"--seen={text}"]
+
+
+def test_failures_carry_the_whole_payload(monkeypatch):
+    import ai_desktop_mcp as server
+
+    payload = {"ok": False, "command": "run", "error": "step 2 (click) failed: screen changed", "code": 1,
+               "done": 1, "results": [{"step": 1, "command": "copy", "ok": True, "result": {"chars": 5}}]}
+    monkeypatch.setattr(server, "run_raw", lambda argv: (1, payload))
+    with pytest.raises(server.CommandError) as info:
+        server.run(["run", "--steps", "[]"])
+    data = json.loads(str(info.value))
+    assert data["error"].startswith("step 2") and data["done"] == 1 and data["results"][0]["command"] == "copy"
+
+
+def test_wait_without_stable_or_changed_is_an_error(monkeypatch):
+    import ai_desktop_mcp as server
+
+    monkeypatch.setattr(server, "run", lambda argv: pytest.fail("ran"))
+    mcp = server.build_server()
+    with pytest.raises(Exception, match="give stable=true, or changed"):
+        asyncio.run(mcp.call_tool("wait", {"stable": False}))
+
+
+def test_a_cancelled_call_stops_at_its_next_pause(monkeypatch):
+    """The client cancels a long type: the engine's next pause sees the token and stops."""
+    import threading
+
+    import anyio
+
+    import ai_desktop_mcp as server
+
+    started, typed = threading.Event(), []
+
+    def slow_type(argv):
+        token = server._CALL.token
+        ad.CANCEL = token
+        try:
+            for ch in "hello world":
+                ad.check_stop()
+                typed.append(ch)
+                started.set()
+                token.wait(0.02)
+        except ad.CliError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code}
+        finally:
+            ad.CANCEL = None
+        return {"ok": True}
+
+    monkeypatch.setattr(server, "run", slow_type)
+
+    async def work():
+        with anyio.move_on_after(0.1):
+            await server._run(["type", "--text", "hello world"])
+        await anyio.to_thread.run_sync(lambda: started.wait(1))
+
+    asyncio.run(work())
+    deadline = __import__("time").monotonic() + 2
+    while len(typed) < 11 and __import__("time").monotonic() < deadline:
+        n = len(typed)
+        __import__("time").sleep(0.1)
+        if len(typed) == n:
+            break
+    assert 0 < len(typed) < 11  # it stopped part-way instead of finishing
+
+
+def test_a_call_cancelled_while_queued_never_runs(monkeypatch):
+    import threading
+
+    import anyio
+
+    import ai_desktop_mcp as server
+
+    ran = []
+    monkeypatch.setattr(ad, "execute", lambda argv, quiet=False: ran.append(argv) or (0, {"ok": True}))
+    server._LOCK.acquire()  # another call is busy
+
+    async def work():
+        with anyio.move_on_after(0.1):
+            await server._run(["click", "--x", "1", "--y", "1"])
+
+    try:
+        asyncio.run(work())
+    finally:
+        server._LOCK.release()
+    __import__("time").sleep(0.2)  # the abandoned worker gets the lock now
+    assert ran == []
+
+
+def test_cancel_check_raises_once_set():
+    import threading
+
+    token = threading.Event()
+    ad.CANCEL = token
+    try:
+        ad.check_stop()
+        token.set()
+        with pytest.raises(ad.CliError) as info:
+            ad.check_stop()
+        assert info.value.code == 130 and "cancelled" in str(info.value)
+    finally:
+        ad.CANCEL = None
+
+
+def test_big_inline_images_are_sent_as_jpeg_under_the_budget(tmp_path):
+    import random
+
+    import ai_desktop_mcp as server
+
+    rng = random.Random(1)
+    noisy = Image.frombytes("RGB", (1600, 900), bytes(rng.getrandbits(8) for _ in range(1600 * 900 * 3)))
+    path = tmp_path / "noisy.png"
+    noisy.save(path)
+    assert path.stat().st_size > server.INLINE_MAX_BYTES
+    image, info = server._inline(str(path))
+    assert info["inline_format"] == "jpeg" and len(image.data) <= server.INLINE_MAX_BYTES
+    small = tmp_path / "small.png"
+    Image.new("RGB", (100, 100), (9, 9, 9)).save(small)
+    image, info = server._inline(str(small))
+    assert info == {} and image.data == small.read_bytes()
