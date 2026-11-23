@@ -67,6 +67,7 @@ ai-desktop screenshots dir|latest|list [--limit 20]|clean [--days N | --all]
 ai-desktop log [--limit 20]
 ai-desktop stop [--reason TEXT]       # every action refuses to run until resume
 ai-desktop resume                     # lift the stop (from a terminal only)
+ai-desktop service status|start|stop  # the background service (starts by itself)
 ai-desktop doctor
 ai-desktop mcp [--max-width 1920]
 ai-desktop --version
@@ -263,6 +264,20 @@ ai-desktop wait --stable --timeout 20 --shot
 ai-desktop run --shot --steps '[["click","--x","500","--y","300"], "type --text hello", "key --key enter"]'
 # OK run steps=3 done=3 shot=/home/me/.ai-desktop/screenshots/20261012-101945-907-grid100.png
 ```
+
+## Background service
+
+On Linux and macOS the first action or screenshot starts a small background process, and later commands hand their work to it over a Unix socket that only you can open. It keeps the virtual mouse and keyboard open, so on Wayland only the first action waits for the compositor to notice a new device (about 0.5 s) instead of every one. It runs the same code with your working folder and `AI_DESKTOP_*` settings and prints exactly what the command would have printed. If you press Ctrl+C, the action stops at its next pause.
+
+It never makes a command fail: when it isn't running, is busy elsewhere, runs older code (after an upgrade or an edit) or belongs to another session, the command runs by itself as before, and an outdated service is replaced. It exits after 30 minutes without a request (`AI_DESKTOP_SERVICE_IDLE`, in seconds).
+
+```bash
+ai-desktop service status        # running=True pid=... requests=... current=True
+ai-desktop service stop          # also fine while an agent works: commands run by themselves
+AI_DESKTOP_SERVICE=off ai-desktop click --x 500 --y 300   # never use it
+```
+
+The commands it runs: click, move, drag, type, key, hotkey, scroll, paste, copy, screenshot, wait and run (not `run --file -`). The rest always run in the calling process; `resume` in particular must see your own terminal. Its log is `~/.ai-desktop/service.log`, and its action log entries carry `via=cli/service`. Windows always runs commands in the calling process.
 
 ## Agent loop
 

@@ -28,6 +28,7 @@ def isolate(monkeypatch, tmp_path):
     for var in list(os.environ):
         if var.startswith(("AI_DESKTOP_", "SNAP")) and var != "AI_DESKTOP_HOME":
             monkeypatch.delenv(var)
+    monkeypatch.setenv("AI_DESKTOP_SERVICE", "off")  # tests run commands in-process
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
         monkeypatch.delenv(var, raising=False)
     # Chrome's profile folders: never the real ones (they hold the user's account names).

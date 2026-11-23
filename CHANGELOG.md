@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.0 (unreleased)
+
+- **Background service.** The first action or screenshot starts a per-user background
+  process (`ai_desktop_service.py`), and later commands hand their work to it over a Unix
+  socket in a folder only you can open (Linux also checks the caller's uid). It keeps the
+  virtual mouse and keyboard open, so on Wayland only the first action pays the 0.5 s
+  device delay. Output, exit codes, the stop switch and the action log are as before
+  (`via=cli/service`); Ctrl+C in the client stops the action at its next pause. It never
+  makes a command fail: if it is missing, busy, from another session or running older
+  code, the command runs by itself, and old code is replaced. `ai-desktop service
+  status|start|stop`; `AI_DESKTOP_SERVICE=off`; it exits after `AI_DESKTOP_SERVICE_IDLE`
+  seconds (default 1800) without a request. Linux and macOS only.
+- Fonts for grid labels are loaded once per size instead of for every screenshot.
+
 ## 0.5.0 (unreleased)
 
 - **Stop switch.** `ai-desktop stop [--reason TEXT]` halts ai-desktop on every platform,

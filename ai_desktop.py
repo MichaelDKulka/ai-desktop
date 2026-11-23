@@ -19,6 +19,7 @@ import argparse
 import atexit
 import contextlib
 import ctypes
+import functools
 import io
 import json
 import math
@@ -259,8 +260,10 @@ FONT_CANDIDATES = (
 )
 
 
+@functools.lru_cache(maxsize=64)
 def load_font(size: int) -> ImageFont.ImageFont:
-    """Return a readable TrueType font, falling back to Pillow's built-in font."""
+    """Return a readable TrueType font, falling back to Pillow's built-in font (cached:
+    each screenshot asks for the same few sizes)."""
     for candidate in FONT_CANDIDATES:
         try:
             return ImageFont.truetype(candidate, size)
@@ -1295,7 +1298,7 @@ STOP_MESSAGE = (
 # Commands that still work while stopped: they only look, or they manage the stop itself.
 STOP_EXEMPT = (
     "stop", "resume", "screenshot", "grid", "monitors", "windows", "position", "log",
-    "screenshots", "doctor", "wait", "mcp",
+    "screenshots", "doctor", "wait", "mcp", "service",
 )
 
 
@@ -3021,6 +3024,7 @@ def run_doctor(backend_name: str) -> list[Check]:
     checks.append(run_check("chrome", _check_chrome, soft=True))
     checks.append(run_check("store", _check_store))
     checks.append(run_check("stop", _check_stop_switch))
+    checks.append(run_check("service", _check_service, soft=True))
     return checks
 
 
@@ -4261,6 +4265,64 @@ def cmd_resume(args: argparse.Namespace) -> None:
     status("resume", stopped=False, was_stopped=True)
 
 
+def cmd_service(args: argparse.Namespace) -> None:
+    try:
+        import ai_desktop_service as svc
+    except Exception as exc:
+        raise CliError(f"the service module can't be loaded: {exc}") from exc
+    if not svc.enabled():
+        raise CliError("the service is off here (AI_DESKTOP_SERVICE=off, or no Unix sockets on this system)")
+    info = svc.status()
+    if args.action == "status":
+        if info is None:
+            status("service", running=False, socket=str(svc.socket_path()))
+            return
+        current = info.get("build") == svc.build_id()
+        status("service", running=True, pid=info["pid"], requests=info["requests"], uptime=info["uptime"],
+               current=current, socket=str(svc.socket_path()))
+        return
+    if args.action == "stop":
+        if info is None:
+            status("service", running=False, stopped=False)
+            return
+        svc.stop()
+        status("service", running=False, stopped=True, pid=info["pid"])
+        return
+    if info is not None and info.get("build") == svc.build_id():  # start
+        status("service", running=True, started=False, pid=info["pid"])
+        return
+    if info is not None:
+        svc.stop()  # older code
+        time.sleep(0.3)
+    with contextlib.suppress(OSError):
+        (svc.runtime_dir() / "spawned").unlink()  # an explicit start ignores the respawn gap
+    if not svc.spawn():
+        raise CliError(f"could not start the service; see {home_dir() / 'service.log'}")
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        info = svc.status()
+        if info is not None:
+            status("service", running=True, started=True, pid=info["pid"])
+            return
+        time.sleep(0.1)
+    raise CliError(f"the service did not come up within 5 s; see {home_dir() / 'service.log'}")
+
+
+def _check_service():
+    try:
+        import ai_desktop_service as svc
+    except Exception as exc:
+        return "warn", f"module missing: {exc}", "reinstall ai-desktop (pip install -e . in a checkout)"
+    if not svc.enabled():
+        return "ok", "off (AI_DESKTOP_SERVICE=off, or no Unix sockets here): every command runs by itself"
+    info = svc.status()
+    if info is None:
+        return "ok", "not running; starts by itself on the next action"
+    if info.get("build") != svc.build_id():
+        return "ok", f"pid {info['pid']} runs older code; the next action replaces it"
+    return "ok", f"pid {info['pid']}, {info['requests']} commands, up {info['uptime']} s"
+
+
 def _check_stop_switch():
     path = stop_path()
     if not path.exists():
@@ -4647,6 +4709,14 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("resume", help="lift a stop; only works from a terminal, so an agent can't lift it")
     p.set_defaults(func=cmd_resume)
 
+    p = add(
+        "service",
+        help="the background service that keeps the input devices open between commands "
+        "(starts by itself; AI_DESKTOP_SERVICE=off turns it off)",
+    )
+    p.add_argument("action", choices=("status", "start", "stop"))
+    p.set_defaults(func=cmd_service)
+
     p = add("doctor", help="check that everything this platform needs is installed and permitted")
     p.set_defaults(func=cmd_doctor)
 
@@ -4793,8 +4863,26 @@ def utf8_console() -> None:
                 pass
 
 
+def forward_to_service(argv: list[str] | None) -> int | None:
+    """Hand the command to the background service, if one can take it (see
+    ai_desktop_service.py); None means: run it here. Never fails a command."""
+    if os.environ.get("AI_DESKTOP_SERVICE", "").strip().lower() in ("0", "off", "false", "no"):
+        return None
+    try:
+        import ai_desktop_service
+    except Exception:
+        return None
+    try:
+        return ai_desktop_service.try_forward(argv)
+    except Exception:
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     utf8_console()
+    code = forward_to_service(argv)
+    if code is not None:
+        return code
     code = execute(argv)[0]
     try:
         sys.stdout.flush()
