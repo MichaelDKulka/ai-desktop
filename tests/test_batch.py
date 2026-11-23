@@ -279,3 +279,15 @@ def test_split_step_keeps_windows_paths(monkeypatch):
     assert ad.split_step('screenshot -o C:\\tmp\\a.png --monitor "1"', 1) == [
         "screenshot", "-o", "C:\\tmp\\a.png", "--monitor", "1",
     ]
+    assert ad.split_step('screenshot -o "C:\\Program Files\\a.png"', 1) == [
+        "screenshot", "-o", "C:\\Program Files\\a.png",
+    ]
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_split_step_quotes_alike_on_every_platform(monkeypatch, platform):
+    monkeypatch.setattr(ad.sys, "platform", platform)
+    assert ad.split_step('type --text="hello world"', 1) == ["type", "--text=hello world"]
+    assert ad.split_step("type --text \"it's done\"", 1) == ["type", "--text", "it's done"]
+    with pytest.raises(ad.CliError, match="step 3: cannot split"):
+        ad.split_step("type --text it's done", 3)

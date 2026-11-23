@@ -3536,12 +3536,16 @@ RUN_FORBIDDEN = ("run", "mcp")
 
 
 def split_step(step: str, i: int) -> list[str]:
-    """Split a command-string step like a shell would. On Windows backslashes in paths
-    are kept (POSIX rules would eat them) and only the surrounding quotes go."""
+    """Split a command-string step like a shell would. Quotes work the same everywhere;
+    on Windows a backslash is an ordinary character, so paths keep theirs (POSIX rules
+    would treat it as an escape and eat it)."""
+    lex = shlex.shlex(step, posix=True)
+    lex.whitespace_split = True
+    lex.commenters = ""
+    if sys.platform == "win32":
+        lex.escape = ""
     try:
-        if sys.platform == "win32":
-            return [t[1:-1] if len(t) > 1 and t[0] == t[-1] and t[0] in "\"'" else t for t in shlex.split(step, posix=False)]
-        return shlex.split(step)
+        return list(lex)
     except ValueError as exc:
         raise CliError(
             f"step {i}: cannot split {step!r} ({exc}); quote it properly or use a list of arguments",
