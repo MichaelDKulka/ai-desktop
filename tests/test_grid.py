@@ -358,3 +358,25 @@ def test_the_size_prune_never_deletes_the_new_screenshot(run, fake_gui, screen, 
     code, out, _ = run("screenshot", "--grid")
     path = ad.Path(out.split("path=")[1].split()[0])
     assert code == 0 and path.exists() and ad.sidecar_path(path).exists()
+
+
+def test_regridding_a_grid_output_keeps_screen_coordinates(run, fake_gui, monkeypatch):
+    # grid saved no metadata, so a second `grid --input` on its output started at (0, 0):
+    # labels showed image pixels, 1920 px off for a monitor left of the primary.
+    def capture(backend, monitor="all", cursor=False):
+        return ad.Capture(Image.new("RGB", (400, 300), (255, 255, 255)), -1920, 0, 1.0, "1")
+
+    monkeypatch.setattr(ad, "capture_screen", capture)
+    run("screenshot", "--grid", "--cursor", "none")
+    path = ad.store_files()[0][0]
+    assert run("grid", "--input", str(path), "--spacing", "30")[0] == 0
+    first = path.with_name(f"{path.stem}_grid.png")
+    meta = ad.read_image_meta(first)
+    assert meta["x"] == -1920 and meta["y"] == 0 and meta["spacing"] == 30
+    with Image.open(first) as img:
+        assert magenta(img.getpixel((30, 137)))  # global -1890, a multiple of 30
+    code, out, _ = run("grid", "--input", str(first), "--spacing", "25")
+    assert code == 0 and " x=-1920 y=0 " in out
+    with Image.open(first.with_name(f"{first.stem}_grid.png")) as img:
+        assert magenta(img.getpixel((45, 137)))  # global -1875, a multiple of 25
+        assert img.getpixel((30, 137)) == (255, 255, 255)  # drawn on the raw copy: the 30 grid is gone

@@ -3657,8 +3657,11 @@ def regrid_source(src: Path) -> tuple[Image.Image, tuple[int, int], float]:
     """
     own = read_image_meta(src) or {}
     raw = sidecar_path(src)
+    linked = False
+    if not raw.is_file() and isinstance(own.get("raw"), str) and (src.parent / own["raw"]).is_file():
+        raw, linked = src.parent / own["raw"], True  # a `grid` output points at the original copy
     raw_meta = read_image_meta(raw) if raw != src and raw.is_file() else None
-    if raw_meta is not None and raw_meta.get("image") not in (None, src.name):
+    if raw_meta is not None and not linked and raw_meta.get("image") not in (None, src.name):
         raw_meta = None  # that copy belongs to another screenshot with the same stem
     if raw_meta is not None:
         with Image.open(raw) as opened:
@@ -3698,7 +3701,24 @@ def cmd_grid(args: argparse.Namespace) -> None:
     if shrink < 1:
         size = (max(1, round(gridded.width * shrink)), max(1, round(gridded.height * shrink)))
         gridded = gridded.resize(size, Image.Resampling.LANCZOS)
-    path = save_image(gridded, args.output or src.with_name(f"{src.stem}_grid.png"))
+    own = read_image_meta(src) or {}
+    raw = sidecar_path(src)
+    if raw == src:  # the input is an un-gridded copy itself
+        raw_name = src.name
+    elif raw.is_file():  # a screenshot next to its copy
+        raw_name = raw.name
+    else:  # an earlier grid output, which links to the copy (or nothing)
+        raw_name = own.get("raw") if isinstance(own.get("raw"), str) else None
+    meta = {
+        "version": 1, "x": origin[0], "y": origin[1], "width": gridded.width, "height": gridded.height,
+        "image_scale": round(scale * shrink, 4), "spacing": spacing, "monitor": own.get("monitor"),
+        "zoom": own.get("zoom"), "raw": raw_name, "kind": "grid",
+    }
+    target = Path(args.output).expanduser() if args.output else src.with_name(f"{src.stem}_grid.png")
+    # The link to the raw copy is a bare name next to the output; elsewhere it isn't found.
+    if raw_name and target.expanduser().resolve().parent != src.resolve().parent:
+        meta["raw"] = None
+    path = save_image(gridded, target, meta)
     status(
         "grid", path=path, width=gridded.width, height=gridded.height, spacing=spacing,
         x=origin[0], y=origin[1], image_scale=round(scale * shrink, 4),

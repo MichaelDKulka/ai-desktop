@@ -113,6 +113,10 @@
   by their declared type (docks, desktops, menus, tooltips and notifications are left
   out), and each has a `type` (`normal`, `dialog`, `utility`). GTK windows that draw their
   own decorations no longer include their invisible shadow margin in x, y, width, height.
+- **`grid` output keeps its screen coordinates.** `grid` saved no metadata, so re-gridding
+  its output started the labels at (0, 0): image pixels, 1920 px off for a monitor left of
+  the primary. It now records origin, scale and spacing, and a link to the original
+  un-gridded copy, which a later `grid --input` draws on.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's
