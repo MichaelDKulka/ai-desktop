@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.9.0 (unreleased)
+
+- **Local vision model.** `locate "the gear icon"`, `describe [--region]` and
+  `observe/watch --describe` use a vision model on this machine (Ollama by default, or an
+  OpenAI-compatible server), with the standard library only. `locate` sends the screen at
+  the model's own grid size and uses its native grounding prompt, checks a close-up with
+  a yes/no question before trusting the answer, and remembers what it found while the
+  pixels there are unchanged. `click --target` falls back to it. MCP: `locate`, `describe`.
+
+## 0.8.0 (unreleased)
+
+- **Find things by name.** `ui` lists the active window's buttons, links and fields from
+  the accessibility tree (AT-SPI on Linux) with references like `e12`; `click --ref`,
+  `--name`, `--mark` (with `screenshot --marks`), `set-text` and `read` act on them. Stale
+  references are refused. Native Wayland windows are placed on screen by matching element
+  names against recognised text, or pressed through accessibility. `ui enable|disable`
+  flips GNOME's accessibility switch; `launch-chrome --a11y` turns on Chrome's tree.
+- **Text recognition.** `text [--find] [--region]` and `click --text [--nth N]` (Tesseract).
+- **`click --target`** tries accessibility, then on-screen text, then the vision model, and
+  says which one found it (`found_by=`).
+- MCP: `ui`, `text`, `read`, `set_text`; `click` takes `target`, `ref`, `name`, `text`,
+  `mark`; `screenshot` takes `marks`; `launch_chrome` takes `a11y`.
+
 ## 0.7.0 (unreleased)
 
 - **Live view.** `ai-desktop live start` keeps a stream of the screen in the background

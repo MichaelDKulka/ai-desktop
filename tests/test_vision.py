@@ -38,23 +38,23 @@ def test_locate_looks_twice_and_remembers(monkeypatch):
 
     def ask(img, question):
         questions.append((img.size, question))
-        if "Find:" in question:
-            # the whole screen goes at 1024 px wide: the gear at 1500,90 is at 800,48 there
-            return '{"x": 800, "y": 48}'
+        if question.startswith("Locate"):
+            # the screen goes at the model's grid size, 1204x672: the gear at 1500,90 is at 941,56 there
+            return '```json\n[{"bbox_2d": [931, 46, 951, 66], "label": "gear"}]\n```'
         return "Yes."
 
     monkeypatch.setattr(vision, "ask", ask)
     vision._MEMORY.clear()
     cap = screen_with_gear()
     found = vision.locate(cap, "the gear icon")
-    assert (found["x"], found["y"], found["verified"]) == (1500, 90, True)
-    assert questions[0][0] == (1024, 576) and "red cross" in questions[1][1]
+    assert abs(found["x"] - 1500) <= 1 and abs(found["y"] - 90) <= 1 and found["verified"] is True
+    assert questions[0][0] == (1204, 672) and "red cross" in questions[1][1]
     again = vision.locate(cap, "The gear icon")
     assert again["remembered"] is True and len(questions) == 2  # no third question
 
 
 def test_locate_refuses_when_the_close_up_disagrees(monkeypatch):
-    monkeypatch.setattr(vision, "ask", lambda img, q: '{"x": 100, "y": 100}' if "Find:" in q else "No, it is a menu.")
+    monkeypatch.setattr(vision, "ask", lambda img, q: '{"x": 100, "y": 100}' if q.startswith("Locate") else "No, it is a menu.")
     vision._MEMORY.clear()
     found = vision.locate(screen_with_gear(), "the gear icon")
     assert found["found"] is False and "disagreed" in found["reason"]
@@ -62,7 +62,7 @@ def test_locate_refuses_when_the_close_up_disagrees(monkeypatch):
 
 def test_memory_is_dropped_when_the_pixels_change(monkeypatch):
     calls = []
-    monkeypatch.setattr(vision, "ask", lambda img, q: calls.append(q) or ('{"x": 800, "y": 48}' if "Find:" in q else "yes"))
+    monkeypatch.setattr(vision, "ask", lambda img, q: calls.append(q) or ('{"x": 941, "y": 56}' if q.startswith("Locate") else "yes"))
     vision._MEMORY.clear()
     vision.locate(screen_with_gear(), "gear")
     moved = Image.new("RGB", (1920, 1080), (250, 250, 250))
@@ -115,10 +115,10 @@ def test_no_server_is_a_clear_error(monkeypatch):
 
 def test_locate_and_describe_commands(run, fake_gui, monkeypatch):
     monkeypatch.setattr(ad, "capture_screen", lambda backend, monitor="all", cursor=False: screen_with_gear())
-    monkeypatch.setattr(vision, "ask", lambda img, q: '{"x": 800, "y": 48}' if "Find:" in q else ("yes" if "red cross" in q else "A settings page."))
+    monkeypatch.setattr(vision, "ask", lambda img, q: '{"x": 941, "y": 56}' if q.startswith("Locate") else ("yes" if "red cross" in q else "A settings page."))
     vision._MEMORY.clear()
     code, out, _ = run("locate", "the gear icon")
-    assert code == 0 and out.startswith("OK locate x=1500 y=90 found_by=vision verified=True")
+    assert code == 0 and out.startswith("OK locate x=150") and "found_by=vision verified=True" in out
     code, out, _ = run("describe")
     assert code == 0 and out.splitlines()[1] == "A settings page."
     monkeypatch.setattr(vision, "ask", lambda img, q: '{"found": false}')
@@ -137,3 +137,10 @@ def test_observe_describe_adds_words(run, fake_gui, monkeypatch):
     code, out, _ = run("--json", "observe", "--describe", "--no-shot")
     data = json.loads(out)
     assert code == 0 and data["description"] == "A small dialog asking to save."
+
+
+def test_model_size_keeps_the_aspect_on_the_models_grid():
+    assert vision.model_size(1920, 1080) == (1204, 672)
+    assert vision.model_size(1366, 768) == (1204, 672)
+    w, h = vision.model_size(3840, 1080)
+    assert w % 28 == 0 and h % 28 == 0 and abs(w / h - 3840 / 1080) < 0.2

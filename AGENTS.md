@@ -36,6 +36,14 @@ and rules as the commands below.
   before acting in that window. Take a screenshot afterwards to confirm it is in front.
 - Want to review what you did? `ai-desktop log`.
 
+## Look less, find more
+
+Before taking a screenshot to find something, ask for it by name:
+`ai-desktop ui` (buttons, links, fields of the active window), `ai-desktop text --find WORD`
+(text on the screen) and `ai-desktop click --target "Send"` cost a line of text, not an
+image. Use `--observe` on actions to see what changed. Take a screenshot when you need to
+see the layout or nothing else finds it.
+
 ## Commands
 
 ```text

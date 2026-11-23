@@ -312,6 +312,42 @@ answer = urllib.request.urlopen("http://127.0.0.1:11434/api/chat", json.dumps(re
 print(json.loads(answer)["message"]["content"])
 ```
 
+## Finding things without a screenshot
+
+A screenshot costs a vision model roughly 1,400 tokens on a 1366x768 screen, and every one stays in the conversation. These answer with a line of text instead, all computed on this machine:
+
+```bash
+ai-desktop ui                          # the active window's buttons, links and fields (accessibility tree)
+# e12 push button "Send" 1180,690 80x36
+ai-desktop click --ref e12             # or: click --name "Send"
+ai-desktop text --find Compose         # text recognition: t7 "Compose" 86,196 92x24
+ai-desktop click --text Compose        # refuses when the text appears more than once (then --nth N)
+ai-desktop click --target "Send"       # accessibility, then on-screen text, then the local vision model
+ai-desktop set-text --name "Search mail" --value "invoice"   # any characters, any keyboard layout
+ai-desktop read --ref e5               # a field's text, value and state
+ai-desktop screenshot --marks          # numbered boxes on the elements; click --mark 12
+```
+
+- **Accessibility** (Linux, through AT-SPI and the system Python's `python3-gi` / `gir1.2-atspi-2.0`): fast (a few hundred elements in well under a second through the service). Some apps expose their content only when accessibility is on: `ai-desktop ui enable` turns on GNOME's switch (apps already running may need a restart; `ui disable` undoes it), and `launch-chrome --a11y` starts Chrome with its accessibility tree. VS Code needs its own "accessibility support" setting. References like `e12` come from the last `ui` (or `screenshot --marks`); if the element changed since, the click is refused as a stale reference.
+- **Where things are on Wayland.** Apps running natively on Wayland (Chrome, GTK 4 apps) report positions relative to their own window, and GNOME won't say where the window is. ai-desktop then matches element names against recognised text; when three or more agree on one offset, the whole window is placed (marked `~`). Otherwise such elements show `(window-relative)` and `click --ref` presses them through accessibility instead of the mouse (`via=accessibility`). Apps under XWayland and GNOME's top bar and dock report screen positions directly.
+- **Text recognition** needs Tesseract (`sudo apt install tesseract-ocr`); the screen is enlarged 2x first, and words on a line are grouped into phrases. The service caches the result until the screen changes.
+- Windows and macOS: `text` and `click --text` work with Tesseract installed; the accessibility commands (`ui`, `--ref`, `--name`, `set-text`, `read`) are Linux-only so far.
+
+## Local vision model
+
+For icons, images and anything without a name or text, a vision model running on this machine can do the looking:
+
+```bash
+ollama pull qwen2.5vl:3b                         # once
+ai-desktop locate "the gear icon at the top right"   # OK locate x=1500 y=90 found_by=vision verified=True ms=48554
+ai-desktop describe --region 400,300,600,300     # what that part of the screen shows, in words
+ai-desktop observe --describe                    # what changed, in words; also watch --describe
+```
+
+- `locate` looks twice: at the whole screen, then at a close-up of the answer with a yes/no question; if the two disagree it refuses rather than guesses. A target it found is reused, without asking again, while the pixels around it are unchanged.
+- It talks to Ollama at `127.0.0.1:11434` by default and picks the first vision model there; `AI_DESKTOP_VISION_URL` (a URL ending in `/v1` means an OpenAI-compatible server such as LM Studio or llama.cpp), `AI_DESKTOP_VISION_MODEL` and `AI_DESKTOP_VISION_TIMEOUT` change that. `AI_DESKTOP_VISION_VERIFY=0` skips the second look.
+- Speed: measured on a laptop without a GPU (Ryzen 5 5625U), `qwen2.5vl:3b` takes about 25 s per look, so about 50 s per `locate`. `doctor` shows the model and warns when there isn't enough free memory for it.
+
 ## Agent loop
 
 ```bash

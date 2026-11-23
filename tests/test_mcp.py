@@ -360,3 +360,28 @@ def test_mcp_uses_the_background_service_when_it_can(monkeypatch):
     monkeypatch.setattr(svc, "call", lambda argv, cancel=None, via="cli": None)  # no service: run here
     monkeypatch.setattr(ad, "execute", lambda argv, quiet=False: (0, {"ok": True, "command": "click", "here": True}))
     assert server.run_raw(["click", "--x", "1", "--y", "2"])[1]["here"] is True
+
+
+def test_find_by_name_tools(monkeypatch):
+    import ai_desktop_mcp as server
+
+    calls = []
+    monkeypatch.setattr(server, "run", lambda argv: calls.append(argv) or {"ok": True})
+    mcp = server.build_server()
+
+    async def work():
+        await mcp.call_tool("click", {"target": "Send", "observe": True})
+        await mcp.call_tool("click", {"ref": "e12"})
+        await mcp.call_tool("click", {"x": 5, "y": 6})
+        await mcp.call_tool("ui", {"find": "save", "role": "push button"})
+        await mcp.call_tool("text", {"find": "Inbox"})
+        await mcp.call_tool("set_text", {"value": "-hello", "ref": "e3"})
+        await mcp.call_tool("locate", {"what": "the gear icon"})
+        await mcp.call_tool("launch_chrome", {"a11y": True})
+
+    asyncio.run(work())
+    assert calls[0][:2] == ["click", "--target=Send"] and calls[0][-1] == "--observe"
+    assert "--ref=e12" in calls[1] and calls[2][:3] == ["click", "--x=5", "--y=6"]
+    assert calls[3] == ["ui", "--find=save", "--role=push button"]
+    assert calls[5][:2] == ["set-text", "--value=-hello"]
+    assert calls[6] == ["locate", "the gear icon"] and calls[7][-1] == "--a11y"

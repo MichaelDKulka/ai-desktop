@@ -29,7 +29,12 @@ import ai_desktop as _ai_desktop
 AD = _ai_desktop
 DEFAULT_URL = "http://127.0.0.1:11434"
 VISION_NAME_HINTS = ("vl", "vision", "llava", "moondream", "minicpm-v", "gemma3", "bakllava", "pixtral", "ui-tars", "showui")
-MODEL_EDGE = 1024  # the long edge the whole-screen look is sent at
+# Qwen-VL models answer in the pixels of the image as *they* resize it: sides that are
+# multiples of 28, about this many pixels in all (measured with Ollama's qwen2.5vl: a
+# 1024x576 and a 640x360 image both came back in 1204x672 coordinates). Sending the
+# image at exactly that size makes the answer plain pixels of what was sent.
+MODEL_PIXELS = 1204 * 672
+MODEL_GRID = 28
 CLOSEUP = (240, 140)  # screen px around the candidate for the second look
 _MEMORY: dict = {}  # description -> (x, y, patch image) for reuse while unchanged
 
@@ -74,6 +79,12 @@ def pick_model(cfg: dict) -> str:
         if any(h in name.lower() for h in VISION_NAME_HINTS):
             return name
     raise AD.CliError("no vision model found (for example: ollama pull qwen2.5vl:3b), or set AI_DESKTOP_VISION_MODEL")
+
+
+def model_size(width: int, height: int) -> tuple[int, int]:
+    scale = (MODEL_PIXELS / (width * height)) ** 0.5
+    return (max(MODEL_GRID, round(width * scale / MODEL_GRID) * MODEL_GRID),
+            max(MODEL_GRID, round(height * scale / MODEL_GRID) * MODEL_GRID))
 
 
 def _jpeg(img) -> str:
@@ -165,18 +176,21 @@ def locate(cap, description: str) -> dict:
             return {"x": x, "y": y, "found_by": "vision", "remembered": True, "ms": 0}
         _MEMORY.pop(description.casefold(), None)
     img = cap.image
-    shrink = min(1.0, MODEL_EDGE / max(img.size))
-    small = img.resize((max(1, round(img.width * shrink)), max(1, round(img.height * shrink))), AD.Image.Resampling.LANCZOS) if shrink < 1 else img
-    answer = ask(small, (
-        f'This is a screenshot, {small.width}x{small.height} pixels. Find: "{description}". '
-        'Reply with JSON only: {"x": <x pixel of its centre>, "y": <y pixel of its centre>} '
-        'in this image, or {"found": false} if it is not there.'))
-    point = parse_point(answer, small.width, small.height)
+    size = model_size(*img.size)
+    sent = img.resize(size, AD.Image.Resampling.LANCZOS)
+    # The model's own grounding prompt: answers are faster and far more reliable than
+    # when asked for a custom JSON shape.
+    answer = ask(sent, f"Locate {description}, output its bbox coordinates using JSON format.")
+    point = parse_point(answer, sent.width, sent.height)
     if point is None:
         return {"found": False, "reason": "the model did not find it", "ms": round((time.monotonic() - started) * 1000)}
-    x, y = cap.x + round(point[0] / shrink), cap.y + round(point[1] / shrink)
+    x = cap.x + round(point[0] * img.width / sent.width)
+    y = cap.y + round(point[1] * img.height / sent.height)
     patch, big = _closeup(cap, x, y)
-    check = ask(big, f'Is the red cross on "{description}"? Answer yes or no.')
+    if os.environ.get("AI_DESKTOP_VISION_VERIFY", "").strip().lower() in ("0", "off", "no", "false"):
+        _MEMORY[description.casefold()] = (x, y, patch)
+        return {"x": x, "y": y, "found_by": "vision", "verified": False, "ms": round((time.monotonic() - started) * 1000)}
+    check = ask(big, f'Is the red cross on {description}? Answer yes or no.')
     ms = round((time.monotonic() - started) * 1000)
     if not yes(check):
         return {"found": False, "reason": f"the close-up check disagreed (the model first said {x},{y})", "candidate_x": x,
