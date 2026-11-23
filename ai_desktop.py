@@ -44,7 +44,7 @@ from typing import NamedTuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageGrab, PngImagePlugin
 
-__version__ = "0.5.0"
+__version__ = "0.6.0.dev0"
 
 DEFAULT_SPACING = 100
 MIN_SPACING = 10
