@@ -33,6 +33,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -1146,6 +1147,42 @@ HUMAN_CURVE = (0.08, 0.25)  # Bezier control-point offset, as a fraction of the 
 HUMAN_JITTER_PX = 2
 POINTER_FILE = "pointer.json"  # Wayland: where the tool last put the pointer
 
+# --- Stop switch ---------------------------------------------------------------------------
+
+# `ai-desktop stop` creates this file; while it exists every action refuses to start and a
+# running one aborts at its next pause (between glide steps, typed characters, drag steps,
+# scroll notches), on every platform including Wayland, where no corner failsafe exists.
+STOP_FILE = "STOP"
+STOP_MESSAGE = (
+    "stopped: the human ran 'ai-desktop stop', so no action runs until they resume. "
+    "Stop and ask them; do not resume or remove the stop yourself."
+)
+# Commands that still work while stopped: they only look, or they manage the stop itself.
+STOP_EXEMPT = (
+    "stop", "resume", "screenshot", "grid", "monitors", "windows", "position", "log",
+    "screenshots", "doctor", "wait", "mcp",
+)
+
+
+def stop_path() -> Path:
+    return home_dir() / STOP_FILE
+
+
+def is_stopped() -> bool:
+    return stop_path().exists()
+
+
+def check_stop() -> None:
+    """Abort (exit 3, like the failsafe) if the human has stopped ai-desktop."""
+    if is_stopped():
+        raise CliError(STOP_MESSAGE, code=EXIT_FAILSAFE, stopped=True)
+
+
+def _pause(seconds: float) -> None:
+    """A pacing wait that first checks the stop switch."""
+    check_stop()
+    _sleep(seconds)
+
 
 def human_enabled(args: argparse.Namespace) -> bool:
     if getattr(args, "instant", False):
@@ -1302,14 +1339,35 @@ def known_pointer(backend: Backend, monitors: list[Monitor]) -> tuple[tuple[int,
 # --- Backends ----------------------------------------------------------------------------
 
 
+def _stub_mouseinfo() -> None:
+    """pyautogui imports mouseinfo, which calls sys.exit() on Linux when tkinter is missing
+    (stock Ubuntu has no python3-tk). We never use its window, so give it an empty module."""
+    if "mouseinfo" not in sys.modules:
+        stub = types.ModuleType("mouseinfo")
+
+        def unavailable(*args, **kwargs):
+            raise CliError("mouseinfo is not available in ai-desktop")
+
+        stub.MouseInfoWindow = unavailable  # type: ignore[attr-defined]
+        sys.modules["mouseinfo"] = stub
+
+
 def load_pyautogui():
     """Import pyautogui lazily so --help, grid and launch-chrome work without a display."""
+    _stub_mouseinfo()
     try:
         import pyautogui
-    except Exception as exc:  # ImportError, or Xlib display errors on Linux
+    except (Exception, SystemExit) as exc:  # ImportError, Xlib display errors, a sys.exit()
         raise CliError(f"cannot load pyautogui: {exc}") from exc
-    pyautogui.FAILSAFE = True  # moving the mouse into any screen corner aborts
+    pyautogui.FAILSAFE = True
     pyautogui.PAUSE = 0.1
+    # pyautogui itself only watches the top-left corner; make all four corners of the
+    # primary screen abort, as documented. check_point and the glide never go there.
+    try:
+        width, height = (int(v) for v in pyautogui.size())
+        pyautogui.FAILSAFE_POINTS = [(0, 0), (width - 1, 0), (0, height - 1), (width - 1, height - 1)]
+    except Exception:
+        pass  # keep pyautogui's default
     return pyautogui
 
 
@@ -1383,7 +1441,7 @@ class PyAutoGuiBackend(Backend):
         # _pause=False skips pyautogui.PAUSE per waypoint; the failsafe check still runs.
         for px, py, pause in self._path_to(x, y):
             if pause > 0:
-                _sleep(pause)
+                _pause(pause)
             self.gui.moveTo(px, py, _pause=False)
 
     def move(self, x: int, y: int) -> None:
@@ -1412,7 +1470,7 @@ class PyAutoGuiBackend(Backend):
         for ch, pause in typing_plan(text, RNG):
             self.gui.write(ch, interval=0, _pause=False)
             if pause:
-                _sleep(pause)
+                _pause(pause)
 
     def press(self, key: str) -> None:
         self.gui.press(key)
@@ -1869,7 +1927,7 @@ class UInputBackend(Backend):
         start, _ = known_pointer(self, getattr(self, "_monitors", None) or list_monitors(self))
         for px, py, pause in self._path_to(x, y, start):
             if pause > 0:
-                _sleep(pause)
+                _pause(pause)
             self._emit_abs(dev, px, py)
 
     @staticmethod
@@ -1912,6 +1970,7 @@ class UInputBackend(Backend):
                 last = (x1, y1)
                 for i in range(1, steps + 1):
                     point = (round(x1 + (x2 - x1) * i / steps), round(y1 + (y2 - y1) * i / steps))
+                    check_stop()
                     if point != last:  # a repeat would make _emit_abs step aside with the button held
                         self._emit_abs(dev, *point)
                         last = point
@@ -1924,13 +1983,14 @@ class UInputBackend(Backend):
         with self._keyboard() as dev:
             if not HUMAN_INPUT:
                 for ch in text:
+                    check_stop()
                     self._tap(dev, *US_CHARMAP[ch])
                     time.sleep(interval)
                 return
             for ch, pause in typing_plan(text, RNG):
                 self._tap(dev, *US_CHARMAP[ch])
                 if pause:
-                    _sleep(pause)
+                    _pause(pause)
 
     def press(self, key: tuple[int, bool]) -> None:
         with self._keyboard() as dev:
@@ -1957,6 +2017,7 @@ class UInputBackend(Backend):
                 self._glide(dev, x, y)
                 self._move_to(dev, x, y)
             for _ in range(abs(notches)):
+                check_stop()
                 dev.emit(EV_REL, REL_WHEEL, step)
                 time.sleep(0.02)
         if x is not None and y is not None:
@@ -2650,6 +2711,7 @@ def run_doctor(backend_name: str) -> list[Check]:
     checks.append(run_check("clipboard", _check_clipboard))
     checks.append(run_check("chrome", _check_chrome, soft=True))
     checks.append(run_check("store", _check_store))
+    checks.append(run_check("stop", _check_stop_switch))
     return checks
 
 
@@ -3532,7 +3594,7 @@ def cmd_wait(args: argparse.Namespace) -> None:
     status("wait", **fields)
 
 
-RUN_FORBIDDEN = ("run", "mcp")
+RUN_FORBIDDEN = ("run", "mcp", "resume")
 
 
 def split_step(step: str, i: int) -> list[str]:
@@ -3648,6 +3710,39 @@ def cmd_run(args: argparse.Namespace) -> None:
         for result in results:
             if isinstance(result["result"].get("text"), str):
                 print(result["result"]["text"])
+
+
+def cmd_stop(args: argparse.Namespace) -> None:
+    path = stop_path()
+    was_stopped = path.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    note = {"since": datetime.now().isoformat(timespec="seconds"), "reason": args.reason or ""}
+    path.write_text(json.dumps(note) + "\n", encoding="utf-8")
+    status("stop", stopped=True, was_stopped=was_stopped, path=str(path))
+
+
+def cmd_resume(args: argparse.Namespace) -> None:
+    path = stop_path()
+    if not path.exists():
+        status("resume", stopped=False, was_stopped=False)
+        return
+    # The stop is the human's brake, so only the human may release it: an agent's shell,
+    # `run` and the MCP server have no terminal on stdin.
+    if QUIET or sys.stdin is None or not sys.stdin.isatty():
+        raise CliError(
+            "resume must be run by the human in a terminal (ai-desktop resume); "
+            "an agent must not release the stop",
+            stopped=True,
+        )
+    path.unlink()
+    status("resume", stopped=False, was_stopped=True)
+
+
+def _check_stop_switch():
+    path = stop_path()
+    if not path.exists():
+        return "ok", "not stopped"
+    return "warn", f"STOPPED ({path})", "every action refuses to run; resume in a terminal: ai-desktop resume"
 
 
 def cmd_doctor(args: argparse.Namespace) -> None:
@@ -4010,6 +4105,17 @@ def build_parser() -> argparse.ArgumentParser:
     group.add_argument("--all", action="store_true", help="clean: delete every screenshot in the store")
     p.set_defaults(func=cmd_screenshots)
 
+    p = add(
+        "stop",
+        help="stop ai-desktop: every action refuses to run, and a running one aborts at its next "
+        "pause (works everywhere, Wayland included); undo with resume",
+    )
+    p.add_argument("--reason", help="a note kept in the stop file")
+    p.set_defaults(func=cmd_stop)
+
+    p = add("resume", help="lift a stop; only works from a terminal, so an agent can't lift it")
+    p.set_defaults(func=cmd_resume)
+
     p = add("doctor", help="check that everything this platform needs is installed and permitted")
     p.set_defaults(func=cmd_doctor)
 
@@ -4074,6 +4180,8 @@ def execute(argv: list[str] | None = None, quiet: bool = False) -> tuple[int, di
         CURRENT_COMMAND = args.command
         HUMAN_INPUT = human_enabled(args)
         try:
+            if args.command not in STOP_EXEMPT:
+                check_stop()
             seed_rng(args)
             args.func(args)
         except CliError as exc:

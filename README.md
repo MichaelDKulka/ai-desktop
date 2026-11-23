@@ -9,8 +9,9 @@ A small command-line tool (and MCP server) that lets **any AI agent that can run
 
 > **⚠️ Safety warning.** Anything that can run this tool has **full control of your desktop and of every account that is logged in on it**: email, banking, admin consoles, password managers. Run it only with an agent you trust, watch what it does, and keep sensitive sessions closed while it runs.
 >
-> - **Windows, macOS, Linux X11:** a *failsafe* is on. Slam the mouse into **any corner of the primary screen** and the current and every following command aborts with exit code 3, until you move the mouse away.
-> - **Linux Wayland:** there is no corner failsafe, because Wayland doesn't let apps read the pointer position. Stop the agent process itself (Ctrl+C in its terminal).
+> - **Everywhere, Wayland included:** run **`ai-desktop stop`** in any terminal. Every action then refuses to start, and a running one aborts at its next pause (between glide steps, typed characters, drag steps), all with exit code 3, until you run `ai-desktop resume` yourself; `resume` only works from a terminal, so an agent can't lift the stop. To stop with one key, bind `ai-desktop stop` to a keyboard shortcut (GNOME: *Settings → Keyboard → Custom Shortcuts*, with the full path from `command -v ai-desktop`).
+> - **Windows, macOS, Linux X11:** the corner *failsafe* is on as well. Slam the mouse into **any corner of the primary screen** and the current and every following command aborts with exit code 3, until you move the mouse away.
+> - **Linux Wayland:** there is no corner failsafe, because Wayland doesn't let apps read the pointer position. Use `ai-desktop stop`, or stop the agent process itself.
 
 ## Install
 
@@ -64,6 +65,8 @@ ai-desktop monitors
 ai-desktop launch-chrome [--url URL] [--profile "Profile 1"]
 ai-desktop screenshots dir|latest|list [--limit 20]|clean [--days N | --all]
 ai-desktop log [--limit 20]
+ai-desktop stop [--reason TEXT]       # every action refuses to run until resume
+ai-desktop resume                     # lift the stop (from a terminal only)
 ai-desktop doctor
 ai-desktop mcp [--max-width 1920]
 ai-desktop --version
@@ -86,7 +89,7 @@ ERROR (5000, 50) is on no monitor; monitors: 0 eDP-1 at 0,0 size 1366x768
 {"ok": false, "command": "click", "error": "(5000, 50) is on no monitor; ...", "code": 1}
 ```
 
-Exit codes: `0` ok, `1` error, `2` bad arguments (plain argparse text, never JSON; a bad `run` step is reported like any other error), `3` failsafe abort.
+Exit codes: `0` ok, `1` error, `2` bad arguments (plain argparse text, never JSON; a bad `run` step is reported like any other error), `3` the human stopped it (`ai-desktop stop`, or the corner failsafe), `130` interrupted (Ctrl+C).
 
 **Human-like pacing.** By default `click`, `move`, `drag` (to its start point; the move with the button held is a straight line over `--duration`) and `scroll --x/--y` glide to the target along a random curved path (up to 60 steps, about 0.15–1.5 s in total, slow-fast-slow) that lands **exactly** on the requested coordinates, stays on a monitor and never crosses a failsafe corner; the target is validated before anything moves. `type` sends one character at a time with a random 0.10–0.15 s pause after each character and 0.25–0.5 s after each space, newline or tab, so a 50-character, 8-word sentence takes about 8 s. `--instant` (or `AI_DESKTOP_HUMAN=0`) jumps straight to the target and types at the fixed `--interval`; `--seed N` (or `AI_DESKTOP_SEED`) makes the path and the pauses repeatable. `paste --text` is still the fast way to enter long text.
 
@@ -254,7 +257,7 @@ ai-desktop wait --stable --timeout 20 --shot
 # OK wait mode=stable polls=3 elapsed=2.9 diff=0.0 shot=/home/me/.ai-desktop/screenshots/20261012-101930-212-grid100.png
 ```
 
-**`run`** does several commands in one process. `--steps` takes a JSON list whose items are argument lists (`["click","--x","500","--y","300"]`) or command strings (`"key --key enter"`); `--file PATH` reads the list from a file, `--file -` from stdin. Every step's arguments are checked before any step runs (a bad one exits 2), and `run` and `mcp` can't be steps. It stops at the first failure with `ERROR step 3 (click) failed: <reason>` and that step's exit code (3 for the failsafe). `--backend` and `--instant` given to `run` apply to every step, and `--shot` takes a screenshot after the last one. Each step is logged as its own entry with `via` set to `cli/run` (or `mcp/run`). On Wayland the virtual input devices stay open across steps, so only the first action of each kind pays the ~0.5 s device delay: measured live, three moves took 1.0 s as one `run` and 2.45 s as three commands. Use it only for short sequences you are sure of, and still look at the screen afterwards.
+**`run`** does several commands in one process. `--steps` takes a JSON list whose items are argument lists (`["click","--x","500","--y","300"]`) or command strings (`"key --key enter"`); `--file PATH` reads the list from a file, `--file -` from stdin. Every step's arguments are checked before any step runs (a bad one exits 2), and `run`, `mcp` and `resume` can't be steps. It stops at the first failure with `ERROR step 3 (click) failed: <reason>` and that step's exit code (3 when the human stopped it). `--backend` and `--instant` given to `run` apply to every step, and `--shot` takes a screenshot after the last one. Each step is logged as its own entry with `via` set to `cli/run` (or `mcp/run`). On Wayland the virtual input devices stay open across steps, so only the first action of each kind pays the ~0.5 s device delay: measured live, three moves took 1.0 s as one `run` and 2.45 s as three commands. Use it only for short sequences you are sure of, and still look at the screen afterwards.
 
 ```bash
 ai-desktop run --shot --steps '[["click","--x","500","--y","300"], "type --text hello", "key --key enter"]'

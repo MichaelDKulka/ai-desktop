@@ -115,3 +115,33 @@ def test_missing_pyautogui_is_a_clean_error(run, monkeypatch):
     monkeypatch.setitem(sys.modules, "pyautogui", None)
     code, _, err = run("--backend", "pyautogui", "position")
     assert code == 1 and "cannot load pyautogui" in err
+
+
+def test_failsafe_watches_all_four_corners(fake_gui):
+    ad.load_pyautogui()
+    assert sorted(fake_gui.FAILSAFE_POINTS) == [(0, 0), (0, 1079), (1919, 0), (1919, 1079)]
+    assert fake_gui.FAILSAFE is True
+
+
+def test_pyautogui_import_that_exits_becomes_an_error(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def exiting_import(name, *args, **kwargs):
+        if name == "pyautogui":
+            raise SystemExit("NOTE: You must install tkinter on Linux to use MouseInfo.")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "pyautogui", raising=False)
+    monkeypatch.setattr(builtins, "__import__", exiting_import)
+    with pytest.raises(ad.CliError, match="cannot load pyautogui: NOTE: You must install tkinter"):
+        ad.load_pyautogui()
+
+
+def test_mouseinfo_is_stubbed_so_tkinter_is_not_needed(monkeypatch, fake_gui):
+    monkeypatch.delitem(sys.modules, "mouseinfo", raising=False)
+    ad.load_pyautogui()
+    stub = sys.modules["mouseinfo"]
+    with pytest.raises(ad.CliError):
+        stub.MouseInfoWindow()

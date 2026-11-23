@@ -2,6 +2,17 @@
 
 ## 0.5.0 (unreleased)
 
+- **Stop switch.** `ai-desktop stop [--reason TEXT]` halts ai-desktop on every platform,
+  Wayland included: every action refuses to start, and a running one aborts at its next
+  pause (glide step, typed character, drag step, scroll notch), all with exit code 3.
+  Looking (screenshot, windows, log, doctor, ...) still works. `ai-desktop resume` lifts it
+  and only works from a terminal, so an agent can't release the human's brake; `resume`
+  can't be a `run` step. `doctor` shows the state.
+- **The corner failsafe watches all four corners** of the primary screen, as documented;
+  pyautogui alone only watched the top-left one.
+- **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's
+  `mouseinfo` import called `sys.exit()`, so every input command ended with a note instead
+  of an `ERROR` line. `mouseinfo` is replaced by an empty module.
 - **Human-like input.** `click`, `move` and `scroll --x/--y` travel along a random curved
   path (at most 1.5 s) that ends exactly on the target, stays on a monitor and never
   crosses a failsafe corner; `type` sends one key at a time with random 0.1–0.15 s pauses
