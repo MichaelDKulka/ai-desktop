@@ -2271,17 +2271,107 @@ def spawn_detached(argv: list[str]) -> None:
     subprocess.Popen(argv, **kwargs)
 
 
+def chrome_user_data_dir() -> Path | None:
+    """Where Chrome keeps its profiles, if it is there."""
+    if sys.platform == "win32":
+        local = os.environ.get("LOCALAPPDATA")
+        candidates = [Path(local) / "Google" / "Chrome" / "User Data"] if local else []
+    elif sys.platform == "darwin":
+        candidates = [Path.home() / "Library" / "Application Support" / "Google" / "Chrome"]
+    else:
+        config = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+        candidates = [config / "google-chrome", config / "chromium"]
+    return next((c for c in candidates if c.is_dir()), None)
+
+
+def chrome_profiles(user_data: Path) -> dict[str, str]:
+    """{profile folder: display name} from Chrome's Local State (folders only if unreadable)."""
+    try:
+        state = json.loads((user_data / "Local State").read_text(encoding="utf-8"))
+        cache = state["profile"]["info_cache"]
+        return {folder: str(info.get("name") or folder) for folder, info in cache.items()}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {d.name: d.name for d in user_data.iterdir() if d.is_dir() and (d.name == "Default" or d.name.startswith("Profile "))}
+
+
+def resolve_chrome_profile(profile: str | None) -> str | None:
+    """The profile folder to pass to Chrome. Chrome silently creates a new, signed-out
+    profile for any unknown --profile-directory, so an unknown name is an error here; a
+    display name ("Work") is mapped to its folder ("Profile 2")."""
+    if profile is None:
+        return None
+    if profile.startswith("-") or "/" in profile or "\\" in profile or profile in (".", ".."):
+        raise CliError(f"--profile must be a profile folder name such as 'Profile 1', not {profile!r}")
+    user_data = chrome_user_data_dir()
+    if user_data is None:
+        return profile  # can't check; Chrome will use or create it
+    profiles = chrome_profiles(user_data)
+    if profile in profiles:
+        return profile
+    by_name = [folder for folder, name in profiles.items() if name.lower() == profile.lower()]
+    if len(by_name) == 1:
+        return by_name[0]
+    listing = ", ".join(f"{folder!r} ({name})" for folder, name in sorted(profiles.items())) or "none"
+    raise CliError(f"no Chrome profile {profile!r} in {user_data}; profiles: {listing}")
+
+
+URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d)")
+
+
+def normalize_url(url: str | None) -> str | None:
+    """Give a bare host a scheme: desktop launchers and `open` treat "example.com" as a
+    local file. Existing files and anything with a scheme are left alone."""
+    if url is None:
+        return None
+    url = url.strip()
+    if not url or url.startswith("-"):
+        raise CliError(f"--url must be a web address or a file, not {url!r}")
+    if URL_SCHEME_RE.match(url) or os.path.exists(os.path.expanduser(url)):
+        return url
+    host = url.split("/", 1)[0].split(":", 1)[0].lower()
+    local = host in ("localhost", "[") or host.startswith("127.") or host.endswith(".localhost")
+    return ("http://" if local else "https://") + url
+
+
 def launch_chrome_macos(url: str | None, profile: str | None) -> None:
-    app = next((p for p in MAC_CHROME_APPS if os.path.isdir(p)), "Google Chrome")
-    argv = ["open", "-a", app]
-    if url:
-        argv.append(url)
+    app = next((p for p in MAC_CHROME_APPS if os.path.isdir(p)), None)
     if profile:
-        argv += ["--args", f"--profile-directory={profile}"]
-    result = subprocess.run(argv, capture_output=True, text=True)
-    if result.returncode != 0:
-        raise CliError(f"could not open Google Chrome: {result.stderr.strip()}")
-    status("launch-chrome", app=app, profile=profile or "last-used", url=url or "none")
+        # `open -a ... --args` passes arguments only when it starts a new instance; with
+        # Chrome already running the profile was dropped. The binary itself hands the
+        # request to the running instance, profile included.
+        if app is None:
+            raise CliError("Google Chrome.app not found in /Applications or ~/Applications")
+        spawn_detached([os.path.join(app, "Contents", "MacOS", "Google Chrome"), f"--profile-directory={profile}", *([url] if url else [])])
+        launcher = "binary"
+    else:
+        argv = ["open", "-a", app or "Google Chrome"] + ([url] if url else [])
+        result = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            raise CliError(f"could not open Google Chrome: {result.stderr.strip()}")
+        launcher = "open"
+    status("launch-chrome", app=app or "Google Chrome", profile=profile or "last-used", url=url or "none", launcher=launcher)
+
+
+def run_launcher(argv: list[str], wait: float = 5.0) -> str | None:
+    """Start a short-lived launcher (gtk-launch, gio) detached and wait briefly for it.
+    Returns None when it worked (or is still running), else the reason it failed."""
+    with tempfile.TemporaryFile() as err:
+        try:
+            proc = subprocess.Popen(
+                argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                env=host_env(), start_new_session=True,
+            )
+        except OSError as exc:
+            return str(exc)
+        try:
+            code = proc.wait(timeout=wait)
+        except subprocess.TimeoutExpired:
+            return None
+        if code == 0:
+            return None
+        err.seek(0)
+        detail = err.read().decode(errors="replace").strip().splitlines()
+        return detail[-1] if detail else f"exit code {code}"
 
 
 # --- Windows (the on-screen kind) --------------------------------------------------------
@@ -3741,43 +3831,53 @@ def cmd_position(args: argparse.Namespace) -> None:
 
 
 def cmd_launch_chrome(args: argparse.Namespace) -> None:
+    url = normalize_url(args.url)
+    profile = resolve_chrome_profile(args.profile)
     if sys.platform == "darwin":
-        launch_chrome_macos(args.url, args.profile)
+        launch_chrome_macos(url, profile)
         return
+    launcher, failed = "exec", None
+    if sys.platform.startswith("linux") and not profile:
+        # Going through the desktop entry gives the launch an activation token, so the
+        # window manager may bring the new window to the front instead of opening it
+        # behind the terminal; it also finds a Flatpak Chrome, which has no binary on
+        # PATH. Desktop entries can't carry --profile-directory.
+        entry = find_desktop_entry(CHROME_DESKTOP_IDS)
+        extra = [url] if url else []
+        argv = None
+        if entry and shutil.which("gtk-launch"):
+            argv, launcher = ["gtk-launch", entry[0], *extra], "gtk-launch"
+        elif entry and shutil.which("gio"):
+            argv, launcher = ["gio", "launch", entry[1], *extra], "gio"
+        if argv is not None:
+            failed = run_launcher(argv)
+            if failed is None:
+                status(
+                    "launch-chrome", exe=f"desktop entry {entry[0]}", user_data_dir="default",
+                    profile="last-used", url=url or "none", launcher=launcher,
+                )
+                return
     exe = find_chrome_executable()
     argv = [exe]
     user_data = None
     if sys.platform == "win32":
         # Point at the existing signed-in data so cookies, logins and extensions carry over.
-        local = os.environ.get("LOCALAPPDATA")
-        candidate = os.path.join(local, "Google", "Chrome", "User Data") if local else None
-        if candidate and os.path.isdir(candidate):
-            user_data = candidate
+        found = chrome_user_data_dir()
+        if found is not None:
+            user_data = str(found)
             argv.append(f"--user-data-dir={user_data}")
-    if args.profile:
-        argv.append(f"--profile-directory={args.profile}")
-    if args.url:
-        argv.append(args.url)
-    launcher = "exec"
-    if sys.platform.startswith("linux") and not args.profile:
-        # Going through the desktop entry gives the launch an activation token, so the
-        # window manager may bring the new window to the front instead of opening it
-        # behind the terminal. Desktop entries can't carry --profile-directory.
-        entry = find_desktop_entry(CHROME_DESKTOP_IDS)
-        url = [args.url] if args.url else []
-        if entry and shutil.which("gtk-launch"):
-            argv, launcher = ["gtk-launch", entry[0], *url], "gtk-launch"
-        elif entry and shutil.which("gio"):
-            argv, launcher = ["gio", "launch", entry[1], *url], "gio"
+    if profile:
+        argv.append(f"--profile-directory={profile}")
+    if url:
+        argv.append(url)
     spawn_detached(argv)
-    status(
-        "launch-chrome",
-        exe=exe,
-        user_data_dir=user_data or "default",
-        profile=args.profile or "last-used",
-        url=args.url or "none",
-        launcher=launcher,
+    fields = dict(
+        exe=exe, user_data_dir=user_data or "default", profile=profile or "last-used",
+        url=url or "none", launcher="exec",
     )
+    if failed is not None:
+        fields["launcher_error"] = f"{launcher}: {failed}"
+    status("launch-chrome", **fields)
 
 
 def cmd_windows(args: argparse.Namespace) -> None:

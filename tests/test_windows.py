@@ -175,19 +175,95 @@ def test_launch_chrome_prefers_the_desktop_entry(run, monkeypatch):
     entry = ("google-chrome", "/usr/share/applications/google-chrome.desktop")
     monkeypatch.setattr(ad, "find_desktop_entry", lambda ids: entry)
     monkeypatch.setattr(ad.shutil, "which", lambda n: f"/usr/bin/{n}" if n in ("gtk-launch", "gio") else None)
-    spawned = []
+    spawned, launched = [], []
     monkeypatch.setattr(ad, "spawn_detached", lambda argv: spawned.append(argv))
+    monkeypatch.setattr(ad, "run_launcher", lambda argv: launched.append(argv))
     code, out, _ = run("launch-chrome", "--url", "https://example.com")
     assert code == 0 and "launcher=gtk-launch" in out
-    assert spawned == [["gtk-launch", "google-chrome", "https://example.com"]]
+    assert launched == [["gtk-launch", "google-chrome", "https://example.com"]] and spawned == []
     monkeypatch.setattr(ad.shutil, "which", lambda n: "/usr/bin/gio" if n == "gio" else None)
     run("launch-chrome")
-    assert spawned[-1] == ["gio", "launch", entry[1]]
-    run("launch-chrome", "--profile", "Profile 1")
+    assert launched[-1] == ["gio", "launch", entry[1]]
+    run("launch-chrome", "--profile", "Profile 1")  # no Chrome folder to check against here
     assert spawned[-1] == ["/usr/bin/google-chrome", "--profile-directory=Profile 1"]
     monkeypatch.setattr(ad, "find_desktop_entry", lambda ids: None)
     _, out, _ = run("launch-chrome")
     assert spawned[-1] == ["/usr/bin/google-chrome"] and "launcher=exec" in out
+
+
+def test_a_failing_launcher_falls_back_to_chrome_itself(run, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(ad, "find_chrome_executable", lambda: "/usr/bin/google-chrome")
+    monkeypatch.setattr(ad, "find_desktop_entry", lambda ids: ("google-chrome", "/x.desktop"))
+    monkeypatch.setattr(ad.shutil, "which", lambda n: "/usr/bin/gtk-launch" if n == "gtk-launch" else None)
+    monkeypatch.setattr(ad, "run_launcher", lambda argv: "no such desktop file")
+    spawned = []
+    monkeypatch.setattr(ad, "spawn_detached", lambda argv: spawned.append(argv))
+    code, out, _ = run("launch-chrome", "--url", "example.com")
+    assert code == 0 and spawned == [["/usr/bin/google-chrome", "https://example.com"]]
+    assert "launcher=exec" in out and 'launcher_error="gtk-launch: no such desktop file"' in out
+
+
+def test_flatpak_chrome_needs_no_binary_on_path(run, monkeypatch):
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(ad, "find_chrome_executable", lambda: (_ for _ in ()).throw(ad.CliError("not found")))
+    monkeypatch.setattr(ad, "find_desktop_entry", lambda ids: ("com.google.Chrome", "/x.desktop"))
+    monkeypatch.setattr(ad.shutil, "which", lambda n: "/usr/bin/gtk-launch" if n == "gtk-launch" else None)
+    monkeypatch.setattr(ad, "run_launcher", lambda argv: None)
+    code, out, _ = run("launch-chrome")
+    assert code == 0 and "desktop entry com.google.Chrome" in out
+
+
+@pytest.mark.parametrize("given,expected", [
+    ("example.com", "https://example.com"),
+    ("www.site.com/path?q=1", "https://www.site.com/path?q=1"),
+    ("localhost:3000/app", "http://localhost:3000/app"),
+    ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+    ("https://mail.google.com", "https://mail.google.com"),
+    ("about:blank", "about:blank"),
+    ("chrome://settings", "chrome://settings"),
+    ("file:///tmp/x.html", "file:///tmp/x.html"),
+])
+def test_normalize_url(given, expected):
+    assert ad.normalize_url(given) == expected
+
+
+def test_a_url_or_profile_that_looks_like_an_option_is_refused(run, monkeypatch):
+    monkeypatch.setattr(ad, "spawn_detached", lambda argv: pytest.fail("launched"))
+    code, _, err = run("launch-chrome", "--url", "--disable-web-security")
+    assert code == 1 and "--url must be a web address" in err
+    code, _, err = run("launch-chrome", "--profile", "../other")
+    assert code == 1 and "--profile must be a profile folder" in err
+
+
+def test_unknown_profile_is_refused_and_display_names_are_mapped(run, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
+    user_data = tmp_path / "config" / "google-chrome"
+    for folder in ("Default", "Profile 2"):
+        (user_data / folder).mkdir(parents=True)
+    (user_data / "Local State").write_text(json.dumps({"profile": {"info_cache": {
+        "Default": {"name": "Personal"}, "Profile 2": {"name": "Work"}}}}), encoding="utf-8")
+    monkeypatch.setattr(ad, "find_chrome_executable", lambda: "/usr/bin/google-chrome")
+    spawned = []
+    monkeypatch.setattr(ad, "spawn_detached", lambda argv: spawned.append(argv))
+    code, _, err = run("launch-chrome", "--profile", "Profile 9")
+    assert code == 1 and "no Chrome profile 'Profile 9'" in err and "'Profile 2' (Work)" in err
+    assert spawned == []  # Chrome would have created an empty, signed-out profile
+    code, out, _ = run("launch-chrome", "--profile", "work")
+    assert code == 0 and spawned[-1] == ["/usr/bin/google-chrome", "--profile-directory=Profile 2"]
+
+
+def test_macos_profile_goes_to_the_binary(run, monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "darwin")
+    app = tmp_path / "Google Chrome.app"
+    app.mkdir()
+    monkeypatch.setattr(ad, "MAC_CHROME_APPS", (str(app),))
+    monkeypatch.setattr(ad, "chrome_user_data_dir", lambda: None)
+    spawned = []
+    monkeypatch.setattr(ad, "spawn_detached", lambda argv: spawned.append(argv))
+    code, out, _ = run("launch-chrome", "--profile", "Profile 1", "--url", "https://x.org")
+    assert code == 0 and "launcher=binary" in out
+    assert spawned == [[str(app / "Contents" / "MacOS" / "Google Chrome"), "--profile-directory=Profile 1", "https://x.org"]]
 
 
 def test_find_desktop_entry(tmp_path, monkeypatch):

@@ -29,6 +29,9 @@ def isolate(monkeypatch, tmp_path):
             monkeypatch.delenv(var)
     for var in ("DISPLAY", "WAYLAND_DISPLAY", "XDG_SESSION_TYPE"):
         monkeypatch.delenv(var, raising=False)
+    # Chrome's profile folders: never the real ones (they hold the user's account names).
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "localappdata"))
     monkeypatch.setattr(ai_desktop, "JSON_OUTPUT", False)
     monkeypatch.setattr(ai_desktop, "CURRENT_COMMAND", None)
     monkeypatch.setattr(ai_desktop, "LOG_VIA", "cli")

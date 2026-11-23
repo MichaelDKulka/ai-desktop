@@ -70,6 +70,14 @@
   `x11`.
 - **A screenshot and its `.raw.png` copy are pruned together**, judged by the newer of the
   two, so `--seen` never finds half a pair.
+- **`launch-chrome` checks what it is given.** A URL without a scheme (`example.com`) gets
+  `https://` (`http://` for localhost); desktop launchers opened it as a missing local
+  file. A `--url` or `--profile` that looks like an option is refused. An unknown
+  `--profile` is refused with the list of profiles, where Chrome would silently create a
+  new, signed-out one; a display name (`Work`) is mapped to its folder (`Profile 2`). On
+  macOS `--profile` works while Chrome is already running. The desktop entry is tried
+  before the binary (a Flatpak Chrome has none on PATH), and a launcher that fails falls
+  back to starting Chrome directly instead of reporting OK.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's
