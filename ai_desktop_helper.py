@@ -171,6 +171,202 @@ class Cast:
             return {"ok": bool(parts), "seq": self.seq, "parts": parts}, blobs
 
 
+
+# --- accessibility (AT-SPI) ------------------------------------------------------------------
+
+MAX_NODES = 4000
+MAX_DEPTH = 40
+# Roles worth showing an agent even without a name.
+ACTIONABLE_ROLES = {
+    "push button", "toggle button", "check box", "radio button", "menu item", "check menu item",
+    "radio menu item", "link", "combo box", "entry", "password text", "text", "slider", "spin button",
+    "page tab", "list item", "tree item", "table cell", "icon", "menu", "tool bar", "button",
+}
+
+
+def _atspi():
+    gi.require_version("Atspi", "2.0")
+    from gi.repository import Atspi
+
+    return Atspi
+
+
+def _states(Atspi, acc):
+    states = acc.get_state_set()
+    names = []
+    for name in ("FOCUSED", "ACTIVE", "CHECKED", "SELECTED", "EXPANDED", "ENABLED", "EDITABLE", "SHOWING", "VISIBLE", "SENSITIVE"):
+        if states.contains(getattr(Atspi.StateType, name)):
+            names.append(name.lower())
+    return names
+
+
+# In current PyGObject the get_*_iface() helpers return the accessible itself, whose own
+# methods shadow the interface's (Accessible.get_text vs Text.get_text), so interface
+# functions are called through their classes, after checking the interface is there.
+
+
+def _has(acc, iface):
+    try:
+        return iface in (acc.get_interfaces() or [])
+    except GLib.Error:
+        return False
+
+
+def _rect(Atspi, acc, kind):
+    if not _has(acc, "Component"):
+        return None
+    try:
+        r = Atspi.Component.get_extents(acc, kind)
+        return [r.x, r.y, r.width, r.height]
+    except GLib.Error:
+        return None
+
+
+def _actions(acc):
+    if not _has(acc, "Action"):
+        return []
+    Atspi = _atspi()
+    name = getattr(Atspi.Action, "get_name", None) or Atspi.Action.get_action_name
+    try:
+        return [name(acc, i) for i in range(Atspi.Action.get_n_actions(acc))]
+    except GLib.Error:
+        return []
+
+
+def _text(Atspi, acc, limit):
+    if not _has(acc, "Text"):
+        return None
+    try:
+        return Atspi.Text.get_text(acc, 0, min(Atspi.Text.get_character_count(acc), limit))
+    except GLib.Error:
+        return None
+
+
+def _apps(Atspi):
+    desktop = Atspi.get_desktop(0)
+    for i in range(desktop.get_child_count()):
+        app = desktop.get_child_at_index(i)
+        if app is not None:
+            yield i, app
+
+
+def _active_window(Atspi):
+    for i, app in _apps(Atspi):
+        for j in range(app.get_child_count()):
+            win = app.get_child_at_index(j)
+            if win is not None and win.get_state_set().contains(Atspi.StateType.ACTIVE):
+                return [i, j], app, win
+    return None
+
+
+def a11y_tree(req: dict) -> dict:
+    """Visible, useful elements of the active window (or of every app), flattened. Each has
+    a `path` (child indexes from the desktop) to act on it later, and both its SCREEN and
+    WINDOW extents: native Wayland apps report SCREEN as window-relative."""
+    Atspi = _atspi()
+    roots = []
+    if req.get("scope") == "all":
+        for i, app in _apps(Atspi):
+            for j in range(app.get_child_count()):
+                win = app.get_child_at_index(j)
+                if win is not None and win.get_state_set().contains(Atspi.StateType.SHOWING):
+                    roots.append(([i, j], app, win))
+    else:
+        found = _active_window(Atspi)
+        if found:
+            roots.append(found)
+    out, count = [], 0
+    windows = []
+    for path, app, win in roots:
+        app_name = app.get_name() or ""
+        toolkit = ""
+        try:
+            toolkit = app.get_toolkit_name() or ""
+        except GLib.Error:
+            pass
+        screen = _rect(Atspi, win, Atspi.CoordType.SCREEN)
+        window = _rect(Atspi, win, Atspi.CoordType.WINDOW)
+        windows.append({"path": path, "app": app_name, "toolkit": toolkit, "title": win.get_name() or "",
+                        "screen": screen, "window": window})
+        stack = [(win, path, 0)]
+        while stack and count < MAX_NODES:
+            acc, apath, depth = stack.pop()
+            count += 1
+            try:
+                states = _states(Atspi, acc)
+                if acc is not win and "showing" not in states:
+                    continue
+                role = acc.get_role_name() or ""
+                name = (acc.get_name() or "").strip()
+                rect = _rect(Atspi, acc, Atspi.CoordType.SCREEN)
+                actions = _actions(acc)
+                editable = "editable" in states
+                if acc is not win and rect and rect[2] > 0 and rect[3] > 0 and (name or role in ACTIONABLE_ROLES or actions or editable):
+                    item = {"path": apath, "role": role, "name": name[:200], "rect": rect, "states": states,
+                            "actions": actions[:6], "window": len(windows) - 1}
+                    if role in ("entry", "text", "spin button", "combo box"):  # never a password
+                        text = _text(Atspi, acc, 200)
+                        if text:
+                            item["text"] = text
+                    out.append(item)
+                if depth < MAX_DEPTH:
+                    n = acc.get_child_count()
+                    for k in range(min(n, 500) - 1, -1, -1):
+                        child = acc.get_child_at_index(k)
+                        if child is not None:
+                            stack.append((child, apath + [k], depth + 1))
+            except GLib.Error:
+                continue
+    out.sort(key=lambda e: (e["window"], e["rect"][1], e["rect"][0]))
+    return {"ok": True, "windows": windows, "elements": out, "visited": count, "truncated": count >= MAX_NODES}
+
+
+def _resolve(Atspi, path):
+    acc = Atspi.get_desktop(0)
+    for index in path:
+        acc = acc.get_child_at_index(index) if acc is not None else None
+    return acc
+
+
+def a11y_do(req: dict) -> dict:
+    """Act on the element at `path`, after checking it is still the same one."""
+    Atspi = _atspi()
+    acc = _resolve(Atspi, req["path"])
+    if acc is None:
+        return {"ok": False, "error": "stale", "detail": "the element is gone"}
+    role, name = acc.get_role_name() or "", (acc.get_name() or "").strip()
+    if role != req.get("role") or name[:200] != req.get("name", ""):
+        return {"ok": False, "error": "stale", "detail": f"now {role} {name[:40]!r}"}
+    what = req.get("do")
+    if what == "press":
+        actions = _actions(acc)
+        for wanted in ("click", "press", "activate", "jump", "toggle", "open"):
+            if wanted in actions:
+                Atspi.Action.do_action(acc, actions.index(wanted))
+                return {"ok": True, "did": wanted}
+        if actions:
+            Atspi.Action.do_action(acc, 0)
+            return {"ok": True, "did": actions[0]}
+        if _has(acc, "Component") and Atspi.Component.grab_focus(acc):
+            return {"ok": True, "did": "focus"}
+        return {"ok": False, "error": "no action", "detail": "the element offers no action and can't take focus"}
+    if what == "focus":
+        return {"ok": bool(_has(acc, "Component") and Atspi.Component.grab_focus(acc)), "did": "focus"}
+    if what == "set-text":
+        if not _has(acc, "EditableText"):
+            return {"ok": False, "error": "not editable"}
+        return {"ok": bool(Atspi.EditableText.set_text_contents(acc, req.get("text", ""))), "did": "set-text"}
+    if what == "read":
+        info = {"ok": True, "role": role, "name": name, "states": _states(Atspi, acc)}
+        if role != "password text":
+            text = _text(Atspi, acc, 10000)
+            if text is not None:
+                info["text"] = text
+        if _has(acc, "Value"):
+            info["value"] = Atspi.Value.get_current_value(acc)
+        return info
+    return {"ok": False, "error": f"unknown action {what!r}"}
+
 def main() -> None:
     out = sys.stdout.buffer
     cast = None
@@ -200,9 +396,10 @@ def main() -> None:
                 else:
                     header, blobs = cast.frame()
                     reply(header, blobs)
-            elif op == "a11y":
-                import ai_desktop_a11y_helper as a11y  # noqa: F401  (Phase 4 adds this)
-                reply(a11y.handle(req))
+            elif op == "a11y-tree":
+                reply(a11y_tree(req))
+            elif op == "a11y-do":
+                reply(a11y_do(req))
             else:
                 reply({"ok": False, "error": f"unknown op {op!r}"})
         except Exception as exc:  # report, never die: the service decides what to do

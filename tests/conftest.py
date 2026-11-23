@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 import types
+import urllib.request
 
 import pytest
 from PIL import Image
@@ -87,6 +88,11 @@ def tripwire(monkeypatch):
     monkeypatch.setattr(ai_desktop.subprocess, "run", guarded_run)
     monkeypatch.setattr(ai_desktop.subprocess, "Popen", guarded_popen)
     monkeypatch.setattr(ai_desktop.ImageGrab, "grab", no_grab)
+
+    def no_network(*args, **kwargs):
+        raise AssertionError("a test tried to reach a real server (a local vision model?)")
+
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
     monkeypatch.setitem(sys.modules, "pyautogui", None)  # import fails unless fake_gui is used
 
 

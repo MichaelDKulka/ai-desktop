@@ -1174,8 +1174,9 @@ def redact_log_fields(arg_dict: dict, result: dict) -> None:
     """
     if log_text_enabled():
         return
-    if isinstance(arg_dict.get("text"), str):
-        arg_dict["text_chars"] = len(arg_dict.pop("text"))
+    for key in ("text", "value"):  # type/paste/clipboard text, set-text's new value
+        if isinstance(arg_dict.get(key), str):
+            arg_dict[f"{key}_chars"] = len(arg_dict.pop(key))
     result.pop("text", None)
     # `run`: the raw --steps JSON can hold typed text (on success it is replaced by the
     # command names), and its steps' results can hold copied text. Copies, not edits:
@@ -1319,7 +1320,8 @@ STOP_MESSAGE = (
 # Commands that still work while stopped: they only look, or they manage the stop itself.
 STOP_EXEMPT = (
     "stop", "resume", "screenshot", "grid", "monitors", "windows", "position", "log",
-    "screenshots", "doctor", "wait", "mcp", "service", "live", "observe", "watch",
+    "screenshots", "doctor", "wait", "mcp", "service", "live", "observe", "watch", "text", "ui", "read",
+    "locate", "describe",
 )
 
 
@@ -3046,6 +3048,10 @@ def run_doctor(backend_name: str) -> list[Check]:
     checks.append(run_check("store", _check_store))
     checks.append(run_check("stop", _check_stop_switch))
     checks.append(run_check("service", _check_service, soft=True))
+    checks.append(run_check("text-recognition", _check_tesseract, soft=True))
+    checks.append(run_check("vision-model", _check_vision, soft=True))
+    if sys.platform.startswith("linux"):
+        checks.append(run_check("live-view", _check_live, soft=True))
     return checks
 
 
@@ -3610,6 +3616,13 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
     factor = args.factor or (1 if args.region is not None else ZOOM_FACTOR)
     backend = get_backend(args.backend)
     cap = None
+    marked = None
+    if args.marks:
+        ui = ui_module()
+        cap = capture_screen(backend, args.monitor, cursor=args.cursor == "auto")
+        snap = ui.snapshot("active", backend, cap if args.monitor == "all" else None)
+        marked = [e for e in snap["elements"] if e["where"] != "window"]
+        cap = cap._replace(image=ui.draw_marks(cap.image, cap.x, cap.y, marked))
     if args.if_changed is not None:
         if args.zoom is not None or args.region is not None:
             raise CliError("--if-changed compares whole screenshots; leave out --zoom and --region", code=2)
@@ -3638,6 +3651,8 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         max_width=args.max_width,
         output=args.output,
     )
+    if marked is not None:
+        fields["marks"] = len(marked)
     if args.if_changed is not None:
         fields = {"unchanged": False, **fields}
         if region is not None:  # where, so an agent can look closer at just that part
@@ -3823,8 +3838,105 @@ def cmd_grid(args: argparse.Namespace) -> None:
     )
 
 
+def ui_module():
+    import ai_desktop_ui
+
+    ai_desktop_ui.bind(sys.modules[__name__])
+    return ai_desktop_ui
+
+
+TARGET_OPTIONS = ("ref", "name", "text", "target", "mark")
+
+
+def resolve_target(args: argparse.Namespace, backend: Backend) -> dict:
+    """Where a click by --ref/--name/--text/--target/--mark goes: {"x", "y", "found_by", ...}
+    for a screen point, or {"element": ...} for an element only accessibility can press."""
+    ui = ui_module()
+    given = [o for o in TARGET_OPTIONS if getattr(args, o, None) is not None]
+    if len(given) > 1:
+        raise CliError("give one of --ref, --name, --text, --target, --mark", code=2)
+    kind = given[0]
+
+    def from_element(element, found_by):
+        if element["where"] == "window":
+            return {"element": element, "found_by": found_by}
+        x, y = ui.center(element["rect"])
+        return {"x": x, "y": y, "found_by": found_by, "ref": element["id"], "name": element["name"][:60]}
+
+    def from_text(query):
+        cap = capture_screen(backend, "all")
+        matches = ui.find_text(ui.screen_text(cap), query)
+        nth = getattr(args, "nth", None)
+        if nth is not None:
+            if not 1 <= nth <= len(matches):
+                raise CliError(f"--nth {nth}: {len(matches)} match(es) for {query!r}")
+            matches = [matches[nth - 1]]
+        if len(matches) > 1:
+            listing = "; ".join(f'{m["id"]} {json.dumps(m["text"][:40])} {m["x"]},{m["y"]}' for m in matches[:6])
+            raise CliError(f"{len(matches)} places show {query!r}; add --nth N or be more precise: {listing}")
+        if not matches:
+            return None
+        m = matches[0]
+        return {"x": m["x"] + m["w"] // 2, "y": m["y"] + m["h"] // 2, "found_by": "text", "text": m["text"][:60]}
+
+    if kind in ("ref", "mark"):
+        return from_element(ui.by_ref(str(getattr(args, kind))), "accessibility")
+    if kind == "name":
+        return from_element(ui.by_name(args.name, getattr(args, "role", None), backend=backend), "accessibility")
+    if kind == "text":
+        found = from_text(args.text)
+        if found is None:
+            raise CliError(f"no text {args.text!r} on the screen")
+        return found
+    # --target: accessibility, then text, then the local vision model
+    tried = []
+    if ui.a11y_supported() is None:
+        try:
+            return from_element(ui.by_name(args.target, getattr(args, "role", None), backend=backend), "accessibility")
+        except CliError as exc:
+            tried.append(f"accessibility: {exc}")
+    try:
+        found = from_text(args.target)
+        if found is not None:
+            return found
+        tried.append("text: not on the screen")
+    except CliError as exc:
+        tried.append(f"text: {exc}")
+    try:
+        found = vision_module().locate_target(backend, args.target)
+        if found is not None:
+            return found
+        tried.append("vision: not found")
+    except CliError as exc:
+        tried.append(f"vision: {exc}")
+    raise CliError(f"could not find {args.target!r} (" + "; ".join(tried) + ")")
+
+
+def vision_module():
+    import ai_desktop_vision
+
+    ai_desktop_vision.bind(sys.modules[__name__])
+    return ai_desktop_vision
+
+
 def cmd_click(args: argparse.Namespace) -> None:
     backend = get_backend(args.backend)
+    found = {}
+    if any(getattr(args, o, None) is not None for o in TARGET_OPTIONS):
+        if args.x is not None or args.y is not None:
+            raise CliError("give --x/--y or a target (--ref, --name, --text, --target, --mark), not both", code=2)
+        found = resolve_target(args, backend)
+        if "element" in found:  # no screen position: press it through accessibility
+            element = found.pop("element")
+            with guarded(args, backend, "pointer"):
+                seen = guard_seen(args, backend)
+                done = ui_module().act(element, "press")
+            finish(args, "click", backend, ref=element["id"], name=element["name"][:60], via="accessibility",
+                   did=done.get("did"), **found, **seen)
+            return
+        args.x, args.y, args.monitor = found.pop("x"), found.pop("y"), None
+    elif args.x is None or args.y is None:
+        raise CliError("give --x and --y, or a target: --ref, --name, --text, --target or --mark", code=2)
     x, y = to_global(backend, args.monitor, args.x, args.y)
     backend.check_point(x, y)
     clicks = 2 if args.double else 1
@@ -3833,7 +3945,7 @@ def cmd_click(args: argparse.Namespace) -> None:
         backend.click(x, y, args.button, clicks)
     finish(
         args, "click", backend, x=x, y=y, button=args.button, clicks=clicks,
-        **_monitor_fields(args), **seen,
+        **_monitor_fields(args), **found, **seen,
     )
 
 
@@ -3904,7 +4016,7 @@ def precheck(args: argparse.Namespace, backend_for) -> None:
         backend_for().resolve_key(args.key)
     elif cmd == "hotkey":
         hotkey_keys(backend_for(), args.keys)
-    elif cmd in ("click", "move"):
+    elif cmd in ("click", "move") and args.x is not None and args.y is not None:
         backend = backend_for()
         backend.check_point(*to_global(backend, args.monitor, args.x, args.y))
     elif cmd == "drag":
@@ -4050,7 +4162,7 @@ def cmd_launch_chrome(args: argparse.Namespace) -> None:
         launch_chrome_macos(url, profile)
         return
     launcher, failed = "exec", None
-    if sys.platform.startswith("linux") and not profile:
+    if sys.platform.startswith("linux") and not profile and not args.a11y:
         # Going through the desktop entry gives the launch an activation token, so the
         # window manager may bring the new window to the front instead of opening it
         # behind the terminal; it also finds a Flatpak Chrome, which has no binary on
@@ -4081,6 +4193,8 @@ def cmd_launch_chrome(args: argparse.Namespace) -> None:
             argv.append(f"--user-data-dir={user_data}")
     if profile:
         argv.append(f"--profile-directory={profile}")
+    if args.a11y:
+        argv.append("--force-renderer-accessibility")
     if url:
         argv.append(url)
     spawn_detached(argv)
@@ -4419,6 +4533,14 @@ def cmd_observe(args: argparse.Namespace) -> None:
                            "observe without --since")
         base = (args.since, cap)
     result = live.observe(view, base=base, timeout=min(args.timeout, WAIT_MAX), quiet=args.quiet, min_cells=args.min_cells)
+    if args.describe and result.get("changed"):
+        cap = result["_cap"]
+        box = (result["changed_x"] - cap.x, result["changed_y"] - cap.y,
+               result["changed_x"] - cap.x + result["changed_width"], result["changed_y"] - cap.y + result["changed_height"])
+        try:
+            result["description"] = vision_module().describe(cap.image.crop(box))
+        except CliError as exc:
+            result["description_error"] = str(exc)
     if args.no_shot:
         result.pop("_cap", None)
     else:
@@ -4439,6 +4561,7 @@ def cmd_watch(args: argparse.Namespace) -> None:
         argv = ["--json", "observe", "--timeout", str(timeout), "--quiet", str(args.quiet)]
         argv += ["--min-cells", str(args.min_cells)] + (["--since", str(seq)] if seq is not None else [])
         argv += ["--no-shot"] if args.no_shot else []
+        argv += ["--describe"] if args.describe else []
         payload = observe_via_service(argv)
         if not payload.get("ok"):
             raise CliError(payload.get("error") or "observe failed", code=int(payload.get("code") or 1))
@@ -4469,6 +4592,87 @@ def observe_via_service(argv: list[str]) -> dict:
             pass
     code, payload = execute(argv, quiet=True)
     return payload or {"ok": code == 0, "code": code}
+
+
+def cmd_locate(args: argparse.Namespace) -> None:
+    vision = vision_module()
+    backend = get_backend(args.backend)
+    found = vision.locate(capture_screen(backend, "all"), args.what)
+    if found.get("found") is False:
+        raise CliError(f"could not find {args.what!r}: {found['reason']}", **found)
+    status("locate", **found)
+
+
+def cmd_describe(args: argparse.Namespace) -> None:
+    vision = vision_module()
+    backend = get_backend(args.backend)
+    cap = capture_screen(backend, "all")
+    img = cap.image
+    if args.region is not None:
+        x, y, w, h = args.region
+        img = img.crop((x - cap.x, y - cap.y, x - cap.x + w, y - cap.y + h))
+    print_text("describe", vision.describe(img, args.question or ""))
+
+
+def cmd_text(args: argparse.Namespace) -> None:
+    ui = ui_module()
+    backend = get_backend(args.backend)
+    phrases = ui.screen_text(capture_screen(backend, args.monitor), args.region)
+    if args.find is not None:
+        phrases = ui.find_text(phrases, args.find)
+    status("text", count=len(phrases), items=phrases)
+    if text_mode():
+        for p in phrases:
+            print(f'{p["id"]} {json.dumps(p["text"], ensure_ascii=False)} {p["x"]},{p["y"]} {p["w"]}x{p["h"]}')
+
+
+def cmd_ui(args: argparse.Namespace) -> None:
+    ui = ui_module()
+    if args.action in ("enable", "disable"):
+        done = ui.enable_accessibility(args.action == "enable")
+        status("ui", action=args.action, **done, note="apps already running may need a restart to show their content")
+        return
+    why = ui.a11y_supported()
+    if why:
+        raise CliError(why)
+    snap = ui.snapshot("all" if args.all else "active", get_backend(args.backend))
+    elements = snap["elements"]
+    if args.find is not None:
+        q = ui.norm(args.find)
+        elements = [e for e in elements if q in ui.norm(e["name"])]
+    if args.role is not None:
+        elements = [e for e in elements if e["role"] == args.role]
+    windows = [f'{w["app"]}: {w["title"][:60]}' for w in snap["windows"]]
+    status("ui", count=len(elements), windows=len(windows), elements=elements)
+    if text_mode():
+        for w in windows:
+            print(f"# {w}")
+        for e in elements:
+            print(ui.element_line(e))
+
+
+def _element_for(args, backend):
+    ui = ui_module()
+    if (args.ref is None) == (args.name is None):
+        raise CliError("give --ref or --name", code=2)
+    return ui.by_ref(args.ref) if args.ref is not None else ui.by_name(args.name, args.role, backend=backend)
+
+
+def cmd_read(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    element = _element_for(args, backend)
+    info = ui_module().act(element, "read")
+    info.pop("ok", None)
+    print_text("read", str(info.pop("text", "")), ref=element["id"], **info)
+
+
+def cmd_set_text(args: argparse.Namespace) -> None:
+    backend = get_backend(args.backend)
+    element = _element_for(args, backend)
+    with guarded(args, backend, "keyboard"):
+        seen = guard_seen(args, backend)
+        ui_module().act(element, "set-text", text=args.value)
+    finish(args, "set-text", backend, ref=element["id"], name=element["name"][:60], chars=len(args.value), **seen)
 
 
 def cmd_service(args: argparse.Namespace) -> None:
@@ -4527,6 +4731,43 @@ def _check_service():
     if info.get("build") != svc.build_id():
         return "ok", f"pid {info['pid']} runs older code; the next action replaces it"
     return "ok", f"pid {info['pid']}, {info['requests']} commands, up {info['uptime']} s"
+
+
+def _check_tesseract():
+    exe = shutil.which("tesseract")
+    if exe:
+        return "ok", exe
+    return "warn", "not installed: text, click --text and click --target can't read the screen", "sudo apt install tesseract-ocr"
+
+
+def _check_vision():
+    info = vision_module().status()
+    detail = f"{info['model']} at {info['url']}"
+    if "size_gb" in info:
+        detail += f" ({info['size_gb']} GB)"
+        free = _available_gb()
+        if free is not None and free < info["size_gb"] * 1.2:
+            return "warn", detail + f", but only {free:.1f} GB of memory is free", "close programs before using locate or describe"
+    return "ok", detail
+
+
+def _available_gb() -> float | None:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) / 1e6
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _check_live():
+    why = live_module().stream_available()
+    if why is None:
+        return "ok", "GNOME screen cast available (ai-desktop live start)"
+    if not is_wayland():
+        return "ok", "polled captures (X11)"
+    return "warn", f"no live stream: {why}"
 
 
 def _check_stop_switch():
@@ -4696,6 +4937,11 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("screenshot", help="capture the screen, optionally with a coordinate grid")
     p.add_argument("--grid", action="store_true", help="overlay labeled grid lines")
     p.add_argument(
+        "--marks", action="store_true",
+        help="number the buttons, links and fields of the active window (from the accessibility "
+        "tree) on the image; click one with click --mark N",
+    )
+    p.add_argument(
         "--region", type=_region, metavar="X,Y,W,H",
         help="only this area (screen coordinates), gridded with screen-coordinate labels; "
         "--factor enlarges it (default 1)",
@@ -4778,9 +5024,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_grid)
 
     acting = [action_flags]
-    p = add("click", acting, help="click at a screen coordinate (the mouse travels there along a human-like path)")
-    p.add_argument("--x", type=int, required=True)
-    p.add_argument("--y", type=int, required=True)
+    p = add("click", acting, help="click at a screen coordinate, or at something found by name or text "
+            "(the mouse travels there along a human-like path)")
+    p.add_argument("--x", type=int)
+    p.add_argument("--y", type=int)
+    hidden = argparse.SUPPRESS  # left out of the parsed arguments (and the log) unless given
+    p.add_argument("--ref", default=hidden, help="an element from 'ai-desktop ui', e.g. e12")
+    p.add_argument("--mark", type=int, default=hidden, help="a numbered box from 'screenshot --marks' (same as --ref eN)")
+    p.add_argument("--name", default=hidden, help="the accessible name of a button, link or field in the active window")
+    p.add_argument("--role", default=hidden, help="with --name or --target: only elements of this role, e.g. 'push button'")
+    p.add_argument("--text", default=hidden, help="text shown on the screen (found by text recognition)")
+    p.add_argument("--nth", type=_positive_int, default=hidden, help="with --text: the N-th place it appears, top to bottom")
+    p.add_argument("--target", default=hidden, help="a name, text or short description: tries accessibility, then "
+                   "on-screen text, then the local vision model")
     p.add_argument("--button", choices=tuple(MOUSE_BUTTONS), default="left")
     p.add_argument("--double", action="store_true", help="double-click")
     p.add_argument(
@@ -4917,6 +5173,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("launch-chrome", help="open Google Chrome with your signed-in profile")
     p.add_argument("--url", help="page to open")
     p.add_argument("--profile", help="profile directory, e.g. 'Profile 1' (default: last used)")
+    p.add_argument("--a11y", action="store_true",
+                   help="turn on Chrome's accessibility tree, so 'ai-desktop ui' sees the page")
     p.set_defaults(func=cmd_launch_chrome)
 
     p = add("screenshots", help="manage the screenshot store: dir, latest, list, clean")
@@ -4942,6 +5200,42 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("resume", help="lift a stop; only works from a terminal, so an agent can't lift it")
     p.set_defaults(func=cmd_resume)
 
+    p = add("locate", help="find something without a name or text by its description (local vision model)")
+    p.add_argument("what", help='e.g. "the gear icon at the top right"')
+    p.set_defaults(func=cmd_locate)
+
+    p = add("describe", help="describe the screen (or --region) in words (local vision model)")
+    p.add_argument("--region", type=_region, metavar="X,Y,W,H")
+    p.add_argument("--question", help="ask this instead of a general description")
+    p.set_defaults(func=cmd_describe)
+
+    p = add("text", help="the text on the screen with positions (text recognition; needs Tesseract)")
+    p.add_argument("--region", type=_region, metavar="X,Y,W,H", help="only this area")
+    p.add_argument("--find", help="only phrases equal to (or containing) this text")
+    p.add_argument("--monitor", default="all", help="all (default), primary, or an index")
+    p.set_defaults(func=cmd_text)
+
+    p = add("ui", help="buttons, links and fields of the active window from the accessibility tree")
+    p.add_argument("action", nargs="?", choices=("list", "enable", "disable"), default="list",
+                   help="enable/disable: GNOME's accessibility switch, which apps such as Chrome need")
+    p.add_argument("--all", action="store_true", help="every visible window, not only the active one")
+    p.add_argument("--find", help="only elements whose name contains this")
+    p.add_argument("--role", help="only elements of this role, e.g. 'push button', 'link', 'entry'")
+    p.set_defaults(func=cmd_ui)
+
+    p = add("read", help="the text, value and state of an element (--ref from 'ai-desktop ui', or --name)")
+    p.add_argument("--ref")
+    p.add_argument("--name")
+    p.add_argument("--role")
+    p.set_defaults(func=cmd_read)
+
+    p = add("set-text", acting, help="replace the text of a field through accessibility (any characters, any layout)")
+    p.add_argument("--ref")
+    p.add_argument("--name")
+    p.add_argument("--role")
+    p.add_argument("--value", required=True, help="the new text")
+    p.set_defaults(func=cmd_set_text)
+
     p = add("live", help="the live view: a continuous screen stream in the background service")
     p.add_argument("action", choices=("start", "stop", "status", "serve"),
                    help="serve: also publish the screen and a viewer with a Stop button on 127.0.0.1")
@@ -4955,6 +5249,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-cells", type=_bounded_int(1, 10000), default=3,
                    help="ignore changes smaller than this many 16 px cells, like a blinking caret (default 3)")
     p.add_argument("--no-shot", action="store_true", help="report the area only, without a screenshot of it")
+    p.add_argument("--describe", action="store_true", help="also describe what changed in words (local vision model)")
     p.set_defaults(func=cmd_observe)
 
     p = add("watch", help="print one line per settled change on the screen, until Ctrl+C")
@@ -4964,6 +5259,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-cells", type=_bounded_int(1, 10000), default=3, help="ignore smaller changes (16 px cells)")
     p.add_argument("--gap", type=_non_negative_float, default=1.0, help="at most one line per this many seconds (default 1)")
     p.add_argument("--no-shot", action="store_true", help="report areas only, without screenshots")
+    p.add_argument("--describe", action="store_true", help="describe each change in words (local vision model)")
     p.set_defaults(func=cmd_watch)
 
     p = add(
@@ -4996,7 +5292,7 @@ def build_parser() -> argparse.ArgumentParser:
 # Options whose value may begin with a dash: text to type or paste, window titles, a zoom
 # point left of the primary monitor (-1420,400), the minus key. argparse would read such a
 # value as another option, so `--text -la` is joined into the one token `--text=-la`.
-DASH_VALUE_OPTIONS = ("--text", "--zoom", "--region", "--title", "--app", "--id", "--url", "--key", "--keys", "--reason", "--profile")
+DASH_VALUE_OPTIONS = ("--text", "--value", "--name", "--target", "--find", "--zoom", "--region", "--title", "--app", "--id", "--url", "--key", "--keys", "--reason", "--profile")
 
 
 def join_dash_values(argv: list[str]) -> list[str]:

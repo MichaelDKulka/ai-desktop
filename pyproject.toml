@@ -37,7 +37,7 @@ Changelog = "https://github.com/MichaelDKulka/ai-desktop/blob/main/CHANGELOG.md"
 ai-desktop = "ai_desktop:main"
 
 [tool.setuptools]
-py-modules = ["ai_desktop", "ai_desktop_mcp", "ai_desktop_service", "ai_desktop_live", "ai_desktop_helper"]
+py-modules = ["ai_desktop", "ai_desktop_mcp", "ai_desktop_service", "ai_desktop_live", "ai_desktop_helper", "ai_desktop_ui", "ai_desktop_vision"]
 
 # The version lives in one place: __version__ in ai_desktop.py.
 [tool.setuptools.dynamic]

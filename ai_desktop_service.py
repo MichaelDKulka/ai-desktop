@@ -41,7 +41,7 @@ import ai_desktop
 # Commands the service runs; the rest gain nothing from it (or must see the client's own
 # terminal and environment: resume, mcp, launch-chrome, doctor).
 FORWARDED = ("click", "move", "drag", "type", "key", "hotkey", "scroll", "paste", "copy", "screenshot", "wait", "run",
-             "live", "observe")
+             "live", "observe", "text", "ui", "read", "set-text", "locate", "describe")
 # These need the service (the live view lives in it), so the client starts one and waits.
 NEEDS_SERVICE = ("live",)
 DEFAULT_IDLE = 1800  # seconds without a request before the service exits
