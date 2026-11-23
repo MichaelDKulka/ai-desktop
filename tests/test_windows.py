@@ -86,6 +86,12 @@ class FakeX11:
     }
     geometries = {0x30: (66, 69, 800, 600, True), 0x20: (0, 0, 100, 100, False), 0x10: (0, 0, 10, 10, True)}
 
+    def __init__(self):
+        # Each connection gets its own copy: activation changes the active window, and a
+        # shared dict made test_x11_window_listing depend on the order tests ran in.
+        self.props = dict(type(self).props)
+        self.sent = []
+
     def __enter__(self):
         return self
 
@@ -110,8 +116,6 @@ class FakeX11:
     def geometry(self, window):
         return self.geometries[window]
 
-    sent = []
-
     def send_client_message(self, window, name, data):
         self.sent.append((window, name, data))
         self.props[(1, "_NET_ACTIVE_WINDOW")] = [window]
@@ -129,11 +133,12 @@ def test_x11_window_listing(monkeypatch):
 
 
 def test_x11_activation_sends_net_active_window(monkeypatch):
-    monkeypatch.setattr(ad, "_X11", FakeX11)
+    connections = []
+    monkeypatch.setattr(ad, "_X11", lambda: connections.append(FakeX11()) or connections[-1])
     monkeypatch.setattr(ad.time, "sleep", lambda s: None)
     result = ad._activate_x11(win("0x20", "Legacy"))
     assert result == {"activated": True}
-    assert FakeX11.sent[-1] == (0x20, "_NET_ACTIVE_WINDOW", [2, 0, 0, 0, 0])
+    assert connections[-1].sent[-1] == (0x20, "_NET_ACTIVE_WINDOW", [2, 0, 0, 0, 0])
 
 
 def test_macos_window_filter(monkeypatch):
@@ -293,3 +298,34 @@ def test_macos_focus_checks_the_window_came_to_the_front(monkeypatch):
     assert ad._activate_macos(target)["activated"] is False  # the app came forward, another window of it
     monkeypatch.setattr(ad, "_windows_macos", lambda: [target._replace(active=True), other])
     assert ad._activate_macos(target)["activated"] is True
+
+
+class TypedX11(FakeX11):
+    atoms = {
+        "_NET_WM_STATE_HIDDEN": 101, "_NET_WM_STATE_SKIP_TASKBAR": 102,
+        "_NET_WM_WINDOW_TYPE_NORMAL": 201, "_NET_WM_WINDOW_TYPE_DIALOG": 202,
+        "_NET_WM_WINDOW_TYPE_DOCK": 203, "_NET_WM_WINDOW_TYPE_DESKTOP": 204,
+        "_NET_WM_WINDOW_TYPE_NOTIFICATION": 205,
+    }
+    props = {
+        (1, "_NET_CLIENT_LIST_STACKING"): [0x10, 0x20, 0x30, 0x40, 0x50],
+        (1, "_NET_ACTIVE_WINDOW"): [0x40],
+        (0x10, "_NET_WM_NAME"): "Desktop icons", (0x10, "_NET_WM_WINDOW_TYPE"): [204],
+        (0x20, "_NET_WM_NAME"): "Files", (0x20, "_NET_WM_WINDOW_TYPE"): [201],
+        (0x20, "_GTK_FRAME_EXTENTS"): [23, 23, 15, 31],  # client-side shadow: invisible margin
+        (0x30, "_NET_WM_NAME"): "Panel", (0x30, "_NET_WM_WINDOW_TYPE"): [203],
+        # GNOME marks a dialog with a parent skip-taskbar; it must still be listed.
+        (0x40, "_NET_WM_NAME"): "Save changes?", (0x40, "_NET_WM_WINDOW_TYPE"): [202],
+        (0x40, "_NET_WM_STATE"): [102],
+        (0x50, "_NET_WM_NAME"): "New mail", (0x50, "_NET_WM_WINDOW_TYPE"): [205],
+    }
+    geometries = {w: (100, 100, 446, 346, True) for w in (0x10, 0x20, 0x30, 0x40, 0x50)}
+
+
+def test_x11_lists_dialogs_and_skips_docks_by_window_type(monkeypatch):
+    monkeypatch.setattr(ad, "_X11", TypedX11)
+    found = ad._windows_x11()
+    assert [(w.title, w.type) for w in found] == [("Save changes?", "dialog"), ("Files", "normal")]
+    assert found[0].active
+    files = found[1]
+    assert (files.x, files.y, files.width, files.height) == (123, 115, 400, 300)  # shadow removed

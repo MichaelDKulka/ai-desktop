@@ -107,6 +107,12 @@
   ran on every clipboard call.
 - **macOS: `focus` checks the window is in front.** It reported success when the app
   accepted the request, even with another of its windows in front.
+- **X11 window list: dialogs are listed, sizes are what you see.** Windows marked
+  skip-taskbar were dropped, and GNOME marks every dialog with a parent that way, so a
+  Save or Preferences dialog could be neither listed nor focused. Windows are now filtered
+  by their declared type (docks, desktops, menus, tooltips and notifications are left
+  out), and each has a `type` (`normal`, `dialog`, `utility`). GTK windows that draw their
+  own decorations no longer include their invisible shadow margin in x, y, width, height.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's

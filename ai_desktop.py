@@ -2408,7 +2408,13 @@ class Win(NamedTuple):
     height: int
     active: bool
     minimized: bool
+    type: str = "normal"  # normal, dialog or utility (X11 EWMH window type; "normal" elsewhere)
 
+
+# EWMH window types that are not windows an agent works with.
+X11_SKIP_TYPES = ("DOCK", "DESKTOP", "SPLASH", "TOOLBAR", "MENU", "DROPDOWN_MENU", "POPUP_MENU",
+                  "TOOLTIP", "NOTIFICATION", "COMBO", "DND")
+X11_KEEP_TYPES = ("NORMAL", "DIALOG", "UTILITY")
 
 WAYLAND_WINDOWS_NOTE = (
     "X11/XWayland windows only: native Wayland windows cannot be listed or focused (GNOME "
@@ -2421,6 +2427,8 @@ def _windows_x11() -> list[Win]:
         stacking = x.get_longs(x.root, "_NET_CLIENT_LIST_STACKING") or x.get_longs(x.root, "_NET_CLIENT_LIST")
         active = (x.get_longs(x.root, "_NET_ACTIVE_WINDOW") or [0])[0]
         hidden, skip = x.atom("_NET_WM_STATE_HIDDEN"), x.atom("_NET_WM_STATE_SKIP_TASKBAR")
+        skip_types = {x.atom(f"_NET_WM_WINDOW_TYPE_{t}") for t in X11_SKIP_TYPES}
+        keep_types = {x.atom(f"_NET_WM_WINDOW_TYPE_{t}"): t.lower() for t in X11_KEEP_TYPES}
         found = []
         for window in reversed(stacking):  # EWMH lists bottom-to-top; we want the front first
             try:
@@ -2428,7 +2436,13 @@ def _windows_x11() -> list[Win]:
                 if not title:
                     continue
                 state = x.get_longs(window, "_NET_WM_STATE")
-                if skip in state:
+                types = x.get_longs(window, "_NET_WM_WINDOW_TYPE")
+                if skip_types.intersection(types):
+                    continue
+                kind = next((keep_types[t] for t in types if t in keep_types), "normal")
+                # Without a type, skip-taskbar marks panels and the like; but GNOME also sets
+                # it on every dialog with a parent, and those must stay listed.
+                if skip in state and kind != "dialog":
                     continue
                 classes = x.get_strings(window, "WM_CLASS")
                 app = classes[1] if len(classes) > 1 else (classes[0] if classes else "")
@@ -2439,11 +2453,18 @@ def _windows_x11() -> list[Win]:
                     gx, gy = gx - extents[0], gy - extents[2]
                     width += extents[0] + extents[1]
                     height += extents[2] + extents[3]
+                # A window that draws its own decorations (GTK) includes an invisible shadow
+                # margin around what you see; leave it out, as the Win32 path does.
+                shadow = x.get_longs(window, "_GTK_FRAME_EXTENTS")
+                if len(shadow) == 4:
+                    gx, gy = gx + shadow[0], gy + shadow[2]
+                    width = max(1, width - shadow[0] - shadow[1])
+                    height = max(1, height - shadow[2] - shadow[3])
             except CliError:
                 continue  # closed while we were looking
             found.append(
                 Win(f"{window:#x}", pid, app, title, gx, gy, width, height, window == active,
-                    hidden in state or not viewable)
+                    hidden in state or not viewable, kind)
             )
         return found
 
