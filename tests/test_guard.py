@@ -220,3 +220,42 @@ def test_a_native_pointer_at_an_unknown_position_matches_itself(run, desk, monke
     monkeypatch.setattr(ad, "capture_screen", spy)
     diff = ad.guard_seen(types.SimpleNamespace(seen=path), ad.get_backend("uinput"), (505, 305))
     assert state["asked"] == [True] and diff["seen_diff"] == 0.0 and ref.cursor == "native"
+
+
+@pytest.mark.parametrize("dialog", [(400, 200), (500, 250), (600, 300)])
+def test_keyboard_guard_catches_a_small_dialog(run, fake_gui, desk, dialog):
+    # Each of these changes less than 10% of a 1920x1080 screen, so the share alone passed.
+    path = shoot(run)
+    w, h = dialog
+    left, top = (1920 - w) // 2, (1080 - h) // 2
+    paint(desk, left, top, left + w, top + h, colour=(48, 48, 48))
+    fake_gui.calls.clear()
+    code, out, err = run("--json", "key", "--key", "enter", "--seen", path)
+    data = json.loads(out)
+    assert code == 1 and data["changed"] < ad.GUARD_SCREEN_MAX
+    assert "is new or different" in data["error"] and "take a new screenshot" in data["error"]
+    bx, by, bw, bh = data["region"]
+    assert abs(bx - left) <= 16 and abs(by - top) <= 16 and abs(bw - w) <= 32 and abs(bh - h) <= 32
+    assert fake_gui.calls == []
+
+
+def test_keyboard_guard_lets_toasts_and_clocks_through(run, fake_gui, desk):
+    path = shoot(run)
+    paint(desk, 1500, 950, 1850, 1030, colour=(40, 40, 40))  # a 350x80 toast
+    paint(desk, 1800, 4, 1900, 24)  # a clock
+    paint(desk, 600, 400, 610, 420)  # a blinking caret
+    code, out, _ = run("type", "--text", "hi", "--seen", path)
+    assert code == 0 and "seen_diff=" in out
+
+
+def test_changed_blocks_finds_each_region():
+    a = Image.new("RGB", (1366, 768), WHITE)
+    b = a.copy()
+    draw = ImageDraw.Draw(b)
+    draw.rectangle([100, 100, 499, 299], fill=(0, 0, 0))
+    draw.rectangle([900, 500, 1000, 540], fill=(0, 0, 0))
+    blocks = sorted(ad.changed_blocks(a, b), key=lambda r: r[2] * r[3], reverse=True)
+    assert len(blocks) == 2
+    x, y, w, h = blocks[0]
+    assert 84 <= x <= 100 and 84 <= y <= 100 and 400 <= w <= 432 and 200 <= h <= 232
+    assert ad.changed_blocks(a, a.copy()) == []

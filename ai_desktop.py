@@ -3092,7 +3092,57 @@ def guard_seen(args: argparse.Namespace, backend: Backend, *points: tuple[int, i
                 f"(limit {GUARD_SCREEN_MAX:.0%}); take a new screenshot before acting",
                 seen=ref.path, changed=round(diff, 3), limit=GUARD_SCREEN_MAX,
             )
+        # A dialog or menu takes the keyboard but may cover only a few percent of a big
+        # screen, so any compact changed area of dialog size counts too. Toasts, clocks
+        # and carets are smaller.
+        dialog_w, dialog_h = GUARD_BLOCK_MIN
+        for left, top, w, h in changed_blocks(ref.image, fresh.image, masks):
+            if w >= dialog_w and h >= dialog_h:
+                region = [ref.x + left, ref.y + top, w, h]
+                raise CliError(
+                    f"screen changed since {ref.path}: a {w}x{h} px area at ({region[0]}, {region[1]}) "
+                    "is new or different (a dialog or menu?), so keys would go somewhere else; "
+                    "take a new screenshot before acting",
+                    seen=ref.path, changed=round(diff, 3), limit=GUARD_SCREEN_MAX, region=region,
+                )
     return {"seen": ref.path, "seen_diff": round(diff, 3)}
+
+
+GUARD_BLOCK_CELL = 16  # px per cell of the grid changed_blocks compares
+GUARD_BLOCK_MIN = (200, 150)  # the smallest changed area (w, h) a keyboard action refuses
+
+
+def changed_blocks(
+    a: Image.Image,
+    b: Image.Image,
+    masks: list[tuple[int, int, int, int]] = (),  # type: ignore[assignment]
+    cell: int = GUARD_BLOCK_CELL,
+    tolerance: int = CELL_TOLERANCE,
+) -> list[tuple[int, int, int, int]]:
+    """Connected areas where `b` differs from `a`, as (left, top, width, height) in image px,
+    measured on a grid of `cell`-px cells (so each side is rounded out to whole cells)."""
+    cols, rows = max(1, a.width // cell), max(1, a.height // cell)
+    fa, fb = fingerprint(a, (cols, rows), masks), fingerprint(b, (cols, rows), masks)
+    changed = {
+        i for i, (p, q) in enumerate(zip(fa, fb)) if p is not None and q is not None and abs(p - q) > tolerance
+    }
+    sx, sy = a.width / cols, a.height / rows
+    blocks = []
+    while changed:
+        stack = [changed.pop()]
+        c0 = c1 = stack[0] % cols
+        r0 = r1 = stack[0] // cols
+        while stack:
+            i = stack.pop()
+            r, c = divmod(i, cols)
+            c0, c1, r0, r1 = min(c0, c), max(c1, c), min(r0, r), max(r1, r)
+            for n, ok in ((i - 1, c > 0), (i + 1, c < cols - 1), (i - cols, r > 0), (i + cols, r < rows - 1)):
+                if ok and n in changed:
+                    changed.remove(n)
+                    stack.append(n)
+        left, top = round(c0 * sx), round(r0 * sy)
+        blocks.append((left, top, round((c1 + 1) * sx) - left, round((r1 + 1) * sy) - top))
+    return blocks
 
 
 def poll_until(

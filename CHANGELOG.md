@@ -8,6 +8,10 @@
   Looking (screenshot, windows, log, doctor, ...) still works. `ai-desktop resume` lifts it
   and only works from a terminal, so an agent can't release the human's brake; `resume`
   can't be a `run` step. `doctor` shows the state.
+- **The keyboard `--seen` check catches dialogs.** `key`, `hotkey`, `type` and `paste`
+  only refused when more than 10% of the screen changed, so a 600x300 dialog on a
+  1920x1080 screen (8.7%) passed and got the keystroke. Any connected changed area of at
+  least 200x150 px now refuses too, with its `region` in the error; toasts still pass.
 - **The corner failsafe watches all four corners** of the primary screen, as documented;
   pyautogui alone only watched the top-left one.
 - **pyautogui no longer needs tkinter.** On Linux without `python3-tk`, pyautogui's
