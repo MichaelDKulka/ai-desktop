@@ -2998,6 +2998,7 @@ def run_doctor(backend_name: str) -> list[Check]:
         )
     if sys.platform == "win32":
         checks.append(run_check("dpi-scale", _check_windows_dpi))
+        checks.append(run_check("ui-automation", _check_ui_automation, soft=True))
         checks.append(
             run_check("powershell", lambda: ("ok", shutil.which("powershell") or "missing"))
         )
@@ -3621,7 +3622,7 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         ui = ui_module()
         cap = capture_screen(backend, args.monitor, cursor=args.cursor == "auto")
         snap = ui.snapshot("active", backend, cap if args.monitor == "all" else None)
-        marked = [e for e in snap["elements"] if e["where"] != "window"]
+        marked = [e for e in snap["elements"] if e["where"] not in ("window", "none")]
         cap = cap._replace(image=ui.draw_marks(cap.image, cap.x, cap.y, marked))
     if args.if_changed is not None:
         if args.zoom is not None or args.region is not None:
@@ -3858,7 +3859,7 @@ def resolve_target(args: argparse.Namespace, backend: Backend) -> dict:
     kind = given[0]
 
     def from_element(element, found_by):
-        if element["where"] == "window":
+        if element["where"] in ("window", "none"):  # no screen position: press it through accessibility
             return {"element": element, "found_by": found_by}
         x, y = ui.center(element["rect"])
         return {"x": x, "y": y, "found_by": found_by, "ref": element["id"], "name": element["name"][:60]}
@@ -4643,7 +4644,8 @@ def cmd_ui(args: argparse.Namespace) -> None:
     if args.role is not None:
         elements = [e for e in elements if e["role"] == args.role]
     windows = [f'{w["app"]}: {w["title"][:60]}' for w in snap["windows"]]
-    status("ui", count=len(elements), windows=len(windows), elements=elements)
+    note = {"note": snap["note"]} if snap.get("note") else {}
+    status("ui", count=len(elements), windows=len(windows), **note, elements=elements)
     if text_mode():
         for w in windows:
             print(f"# {w}")
@@ -4671,8 +4673,9 @@ def cmd_set_text(args: argparse.Namespace) -> None:
     element = _element_for(args, backend)
     with guarded(args, backend, "keyboard"):
         seen = guard_seen(args, backend)
-        ui_module().act(element, "set-text", text=args.value)
-    finish(args, "set-text", backend, ref=element["id"], name=element["name"][:60], chars=len(args.value), **seen)
+        done = ui_module().set_text(element, args.value, backend)
+    how = {"did": "paste"} if done.get("did") == "paste" else {}  # Windows fallback: no writable ValuePattern
+    finish(args, "set-text", backend, ref=element["id"], name=element["name"][:60], chars=len(args.value), **how, **seen)
 
 
 def cmd_service(args: argparse.Namespace) -> None:
@@ -4738,6 +4741,15 @@ def _check_tesseract():
     if exe:
         return "ok", exe
     return "warn", "not installed: text, click --text and click --target can't read the screen", "sudo apt install tesseract-ocr"
+
+
+def _check_ui_automation():
+    ui = ui_module()
+    why = ui.a11y_supported()
+    if why:
+        return "warn", why, 'pip install "ai-desktop[windows]" for ui, click --ref/--name, set-text and read'
+    found = ui.uia_module().api().top_windows()
+    return "ok", f"UIAutomationCore through comtypes ({len(found)} top-level windows)"
 
 
 def _check_vision():

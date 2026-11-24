@@ -413,8 +413,9 @@ def build_server(default_max_width: int | None = None) -> MCPServer:
         """The buttons, links and fields of the active window from the accessibility tree,
         as text: one line each with a ref (e12), role, name and screen position. Far
         cheaper than a screenshot; click one with click(ref="e12"). Positions marked "~"
-        were placed by matching on-screen text; "(window-relative)" ones are still
-        clickable by ref. Chrome needs launch_chrome(a11y=true) first."""
+        were placed by matching on-screen text; "(window-relative)" and "(no position)" ones
+        are still clickable by ref. Chrome needs launch_chrome(a11y=true) first.
+        Linux (AT-SPI) and Windows (UI Automation)."""
         argv = ["ui"] + _opt("--find", find) + _opt("--role", role) + (["--all"] if all_windows else [])
         return dumps(await _run(argv))
 

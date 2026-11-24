@@ -2,9 +2,10 @@
 
 Two local sources, both answering with a line of text per thing found:
 
-- the accessibility tree (AT-SPI on Linux, through ai_desktop_helper.py): buttons, links,
-  fields and the like with their role, name and position; elements get references such
-  as `e12`, kept in ~/.ai-desktop/ui-snapshot.json until the next snapshot;
+- the accessibility tree (AT-SPI on Linux, through ai_desktop_helper.py; UI Automation on
+  Windows, through ai_desktop_uia.py): buttons, links, fields and the like with their
+  role, name and position; elements get references such as `e12`, kept in
+  ~/.ai-desktop/ui-snapshot.json until the next snapshot;
 - text recognition (Tesseract) of the screen: every phrase with its position.
 
 On GNOME Wayland, apps that run natively on Wayland (Chrome, Firefox, GTK 4 apps) report
@@ -142,9 +143,18 @@ def find_text(phrases: list[dict], query: str) -> list[dict]:
 
 
 def a11y_supported() -> str | None:
+    if sys.platform == "win32":
+        return uia_module().unavailable()
     if not sys.platform.startswith("linux"):
-        return "the accessibility tree is supported on Linux so far (Windows UI Automation and macOS AX are not done yet)"
+        return "the accessibility tree is supported on Linux and Windows so far (macOS AX is not done yet)"
     return None
+
+
+def uia_module():
+    import ai_desktop_uia
+
+    ai_desktop_uia.bind(AD)
+    return ai_desktop_uia
 
 
 def helper():
@@ -162,6 +172,8 @@ def ask(request: dict) -> dict:
     why = a11y_supported()
     if why:
         raise AD.CliError(why)
+    if sys.platform == "win32":  # UI Automation answers the helper's requests in-process
+        return uia_module().handle(request)
     proc, temporary = helper()
     try:
         head, _ = proc.ask(request)
@@ -228,11 +240,15 @@ def snapshot(scope: str = "active", backend=None, cap=None) -> dict:
     out = []
     for i, e in enumerate(elements, 1):
         kind, (dx, dy) = placed[e["window"]]
+        if e.get("where") == "none":  # UI Automation: no usable bounds, so no point to click
+            kind, dx, dy = "none", 0, 0
         x, y, w, h = e["rect"]
         item = {**e, "id": f"e{i}", "where": kind}
         item["rect"] = [x + dx, y + dy, w, h] if kind != "window" else e["rect"]
         out.append(item)
     snap = {"taken": time.time(), "scope": scope, "windows": windows, "elements": out}
+    if tree.get("note"):
+        snap["note"] = tree["note"]
     try:
         with AD.private_file(AD.private_dir(AD.home_dir()) / SNAPSHOT_FILE) as fh:
             json.dump(snap, fh)
@@ -250,7 +266,7 @@ def load_snapshot() -> dict:
 
 def element_line(e: dict) -> str:
     x, y, w, h = e["rect"]
-    where = {"screen": "", "aligned": " ~", "window": " (window-relative)"}[e["where"]]
+    where = {"screen": "", "aligned": " ~", "window": " (window-relative)", "none": " (no position)"}[e["where"]]
     flags = [s for s in e.get("states", []) if s in ("focused", "checked", "selected", "expanded")]
     extra = (" " + ",".join(flags)) if flags else ""
     text = f" text={json.dumps(e['text'][:60], ensure_ascii=False)}" if e.get("text") else ""
@@ -283,15 +299,44 @@ def by_name(name: str, role: str | None = None, scope: str = "active", backend=N
     return found[0]
 
 
+def _request(element: dict, what: str, **extra) -> dict:
+    answer = ask({"op": "a11y-do", "path": element["path"], "role": element["role"], "name": element["name"], "do": what, **extra})
+    if not answer.get("ok") and answer.get("error") == "stale":
+        raise AD.CliError(f"stale reference {element['id']}: the screen changed ({answer.get('detail')}); "
+                          "take a new snapshot (ai-desktop ui)")
+    return answer
+
+
+def _failed(element: dict, what: str, answer: dict) -> AD.CliError:
+    return AD.CliError(f"{what} on {element['id']} failed: {answer.get('error')} {answer.get('detail', '')}".strip())
+
+
 def act(element: dict, what: str, **extra) -> dict:
     """Do something to an element through accessibility, after checking it is the same."""
-    answer = ask({"op": "a11y-do", "path": element["path"], "role": element["role"], "name": element["name"], "do": what, **extra})
+    answer = _request(element, what, **extra)
     if not answer.get("ok"):
-        if answer.get("error") == "stale":
-            raise AD.CliError(f"stale reference {element['id']}: the screen changed ({answer.get('detail')}); "
-                              "take a new snapshot (ai-desktop ui)")
-        raise AD.CliError(f"{what} on {element['id']} failed: {answer.get('error')} {answer.get('detail', '')}".strip())
+        raise _failed(element, what, answer)
     return answer
+
+
+def set_text(element: dict, text: str, backend) -> dict:
+    """Replace a field's text through accessibility. When UI Automation offers no writable
+    ValuePattern it asks for the fallback: focus the field, select all, paste."""
+    answer = _request(element, "set-text", text=text)
+    if answer.get("ok"):
+        return answer
+    if answer.get("fallback") != "paste":
+        raise _failed(element, "set-text", answer)
+    focused = _request(element, "focus")
+    if not focused.get("ok"):
+        if element.get("where") not in ("screen", "aligned"):
+            raise AD.CliError(f"set-text on {element['id']} failed: it has no writable value and can't take focus")
+        backend.click(*center(element["rect"]), "left", 1)
+    backend.hotkey(AD._shortcut(backend, "a"))
+    AD.set_clipboard(text)
+    AD._sleep(0.2)  # let the clipboard owner settle, as paste --text does
+    backend.hotkey(AD._shortcut(backend, "v"))
+    return {"ok": True, "did": "paste"}
 
 
 def center(rect) -> tuple[int, int]:
@@ -308,7 +353,7 @@ def draw_marks(img, ox: int, oy: int, elements: list[dict]):
     draw = ImageDraw.Draw(overlay)
     font = AD.load_font(14)
     for e in elements:
-        if e["where"] == "window":
+        if e["where"] in ("window", "none"):
             continue
         x, y, w, h = e["rect"]
         x, y = x - ox, y - oy
@@ -322,6 +367,9 @@ def draw_marks(img, ox: int, oy: int, elements: list[dict]):
 def enable_accessibility(on: bool) -> dict:
     """Turn GNOME's accessibility switch on or off (apps such as Chrome and VS Code expose
     their content only when it is on; already running apps may need a restart)."""
+    if sys.platform == "win32":
+        raise AD.CliError("UI Automation is always on in Windows; Chrome shows its page content when "
+                          "started with: ai-desktop launch-chrome --a11y")
     value = "true" if on else "false"
     done = {}
     if shutil.which("gsettings"):

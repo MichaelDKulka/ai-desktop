@@ -30,6 +30,7 @@ powershell -ExecutionPolicy Bypass -File setup.ps1       # Windows        (add -
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e .                   # or: pip install -e ".[mcp]" for the MCP server (Python 3.10+)
+pip install -e ".[windows]"        # Windows: adds comtypes for the accessibility commands (setup.ps1 does this)
 ai-desktop doctor                  # tells you what your OS still needs
 ```
 
@@ -328,10 +329,16 @@ ai-desktop read --ref e5               # a field's text, value and state
 ai-desktop screenshot --marks          # numbered boxes on the elements; click --mark 12
 ```
 
-- **Accessibility** (Linux, through AT-SPI and the system Python's `python3-gi` / `gir1.2-atspi-2.0`): fast (a few hundred elements in well under a second through the service). Some apps expose their content only when accessibility is on: `ai-desktop ui enable` turns on GNOME's switch (apps already running may need a restart; `ui disable` undoes it), and `launch-chrome --a11y` starts Chrome with its accessibility tree. VS Code needs its own "accessibility support" setting. References like `e12` come from the last `ui` (or `screenshot --marks`); if the element changed since, the click is refused as a stale reference.
+- **Accessibility on Linux** (through AT-SPI and the system Python's `python3-gi` / `gir1.2-atspi-2.0`): fast (a few hundred elements in well under a second through the service). Some apps expose their content only when accessibility is on: `ai-desktop ui enable` turns on GNOME's switch (apps already running may need a restart; `ui disable` undoes it), and `launch-chrome --a11y` starts Chrome with its accessibility tree. VS Code needs its own "accessibility support" setting. References like `e12` come from the last `ui` (or `screenshot --marks`); if the element changed since, the click is refused as a stale reference.
 - **Where things are on Wayland.** Apps running natively on Wayland (Chrome, GTK 4 apps) report positions relative to their own window, and GNOME won't say where the window is. ai-desktop then matches element names against recognised text; when three or more agree on one offset, the whole window is placed (marked `~`). Otherwise such elements show `(window-relative)` and `click --ref` presses them through accessibility instead of the mouse (`via=accessibility`). Apps under XWayland and GNOME's top bar and dock report screen positions directly.
 - **Text recognition** needs Tesseract (`sudo apt install tesseract-ocr`); the screen is enlarged 2x first, and words on a line are grouped into phrases. The service caches the result until the screen changes.
-- Windows and macOS: `text` and `click --text` work with Tesseract installed; the accessibility commands (`ui`, `--ref`, `--name`, `set-text`, `read`) are Linux-only so far.
+- **Accessibility on Windows** (UI Automation through `comtypes`, the `windows` extra; `doctor` shows it as `ui-automation`). The same commands and the same output: roles use the Linux names (`push button`, `entry`, `link`, `check box`...), so `--role` works the same on both. Win32, WPF, UWP/WinUI and Chromium apps (Chrome, Edge, Electron) are read; offscreen parts are skipped, and the walk stops at 4,000 elements or 40 levels. Chrome and Edge build their page tree when UI Automation first asks; `ui` waits up to a second for it, and if the page is still empty says so (`note=`): start Chrome with `launch-chrome --a11y` to have the page there from the start.
+  - `click --ref/--name/--target` click the middle of the element with the real mouse. An element without a usable position (smaller than 3 px, or outside its window or the screen) is listed with `(no position)` and pressed through UI Automation instead: Invoke, then Toggle, SelectionItem, ExpandCollapse, the default action, focus (`via=accessibility did=invoke`).
+  - `set-text` uses the field's ValuePattern. A field without a writable one (rich editors, some web fields) is focused (or clicked), then select-all and paste replace its text (`did=paste`); like `paste --text`, that leaves the text on the clipboard.
+  - `read` gives the field's value, else its text, else (for plain text) its name; never a password field's contents.
+  - The tree is kept in `~/.ai-desktop/uia-cache.json` and read again when the screen or the active window changes, after a minute, or after acting on an element.
+  - `ui enable|disable` (GNOME's switch) does not apply: UI Automation is always on.
+- macOS: `text` and `click --text` work with Tesseract installed; the accessibility commands (`ui`, `--ref`, `--name`, `set-text`, `read`) are Linux and Windows only so far.
 
 ## Local vision model
 
@@ -485,7 +492,7 @@ Other notes:
 - **Scaling.** 100% display scaling is recommended (`doctor` shows the current value). Other scales work as long as every monitor uses the same one.
 - **Admin windows.** Input can't reach windows running as administrator (Task Manager, installers, UAC prompts) unless the tool itself runs from an elevated terminal.
 - **Scroll.** `--amount` counts mouse-wheel notches.
-- Nothing else to install: the clipboard uses PowerShell, which is built in.
+- Nothing else to install: the clipboard uses PowerShell, which is built in. The accessibility commands need the `windows` extra (`pip install "ai-desktop[windows]"`, comtypes), which `setup.ps1` installs; see [Finding things without a screenshot](#finding-things-without-a-screenshot).
 
 ### Linux on X11
 In an X11 session, such as **"Ubuntu on Xorg"** picked from the gear icon on the login screen, input goes through pyautogui exactly as on Windows and macOS, failsafe included, and `windows`/`focus` see every window. Screenshots use `gnome-screenshot` (or `grim`/`spectacle`) when installed and Pillow's own X11 capture otherwise. Install `xclip` for the clipboard.

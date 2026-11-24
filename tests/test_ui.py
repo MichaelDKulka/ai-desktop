@@ -215,9 +215,9 @@ def test_launch_chrome_a11y_adds_the_flag(run, monkeypatch):
 
 
 def test_accessibility_says_where_it_is_not_supported(monkeypatch, run):
-    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "darwin")
     code, _, err = run("ui")
-    assert code == 1 and "Linux so far" in err
+    assert code == 1 and "Linux and Windows so far" in err and "macOS" in err
 
 
 def test_no_tesseract_is_a_clear_error(run, monkeypatch, fake_gui):

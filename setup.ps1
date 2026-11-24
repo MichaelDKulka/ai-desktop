@@ -35,7 +35,7 @@ if (-not (Test-Path ".venv\Scripts\python.exe")) {
     & $pyExe @pyArgs -m venv .venv
 }
 & .venv\Scripts\python.exe -m pip install --quiet --upgrade pip
-$extras = @()
+$extras = @("windows")  # comtypes, for UI Automation (ui, click --ref/--name, set-text, read)
 if ($Dev) { $extras += "dev" }
 if ($Mcp) { $extras += "mcp" }
 $spec = if ($extras) { ".[" + ($extras -join ",") + "]" } else { "." }

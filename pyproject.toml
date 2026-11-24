@@ -26,6 +26,8 @@ dependencies = ["pyautogui>=0.9.54", "pillow>=10.1"]
 dev = ["pytest>=7", "pytest-cov", "ruff", "build"]
 # The MCP server (`ai-desktop mcp`); the SDK needs Python 3.10+, the core stays on 3.9.
 mcp = ["mcp>=2; python_version >= '3.10'"]
+# Windows UI Automation for ui, click --ref/--name/--target, set-text and read.
+windows = ["comtypes>=1.4; sys_platform == 'win32'"]
 
 [project.urls]
 Homepage = "https://github.com/MichaelDKulka/ai-desktop"
@@ -37,7 +39,7 @@ Changelog = "https://github.com/MichaelDKulka/ai-desktop/blob/main/CHANGELOG.md"
 ai-desktop = "ai_desktop:main"
 
 [tool.setuptools]
-py-modules = ["ai_desktop", "ai_desktop_mcp", "ai_desktop_service", "ai_desktop_live", "ai_desktop_helper", "ai_desktop_ui", "ai_desktop_vision"]
+py-modules = ["ai_desktop", "ai_desktop_mcp", "ai_desktop_service", "ai_desktop_live", "ai_desktop_helper", "ai_desktop_ui", "ai_desktop_uia", "ai_desktop_vision"]
 
 # The version lives in one place: __version__ in ai_desktop.py.
 [tool.setuptools.dynamic]

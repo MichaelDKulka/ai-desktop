@@ -38,10 +38,11 @@ jobs:
       # The MCP extra needs Python 3.10+, so the 3.9 rows install and test without it.
       - name: Install
         run: |
+          # The windows extra (comtypes) is a no-op elsewhere; on Windows it runs the UIA smoke test.
           if [ "${{ matrix.python }}" = "3.9" ]; then
-            python -m pip install -e ".[dev]"
+            python -m pip install -e ".[dev,windows]"
           else
-            python -m pip install -e ".[dev,mcp]"
+            python -m pip install -e ".[dev,mcp,windows]"
           fi
 
       - name: Lint (syntax errors and undefined or unused names)

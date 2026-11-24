@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Accessibility on Windows.** `ui`, `click --ref/--name/--mark`, the accessibility step
+  of `click --target`, `set-text` and `read` work on Windows through UI Automation
+  (`ai_desktop_uia.py`, comtypes in the new `windows` extra), with the same output,
+  references, role names and stale-reference refusal as on Linux. Chromium windows
+  (Chrome, Edge, Electron) are retried briefly while their page tree is built, with a
+  `note=` pointing at `launch-chrome --a11y` when it stays empty. Elements without a
+  usable position show `(no position)` and are pressed through UI Automation;
+  `set-text` falls back to focus, select-all and paste for fields without a writable
+  ValuePattern. The tree is cached until the screen changes. `doctor` reports
+  `ui-automation` on Windows.
+
 ## 0.5.0 (2026-11-23)
 
 - **Local vision model.** `locate "the gear icon"`, `describe [--region]` and
