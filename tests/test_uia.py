@@ -439,25 +439,44 @@ def test_doctor_reports_ui_automation(monkeypatch, windows):
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows UI Automation")
 def test_smoke_real_ui_automation(tmp_path):
+    """A native message box: a real named button and a label, read and pressed through
+    the real UIAutomationCore. (A classic Tk button has no accessible name.)"""
     pytest.importorskip("comtypes")
-    script = tmp_path / "win.py"
-    script.write_text(
-        "import tkinter as tk\n"
-        "r = tk.Tk(); r.title('ai-desktop uia smoke'); r.geometry('300x120+100+100')\n"
-        "tk.Button(r, text='Smoke OK').pack(); r.after(20000, r.destroy); r.mainloop()\n")
+    title = "ai-desktop uia smoke"
+    script = tmp_path / "box.py"
+    script.write_text(f"import ctypes\nctypes.windll.user32.MessageBoxW(0, 'Smoke body text', {title!r}, 0)\n")
     proc = subprocess.Popen([sys.executable, str(script)])
     try:
-        found = None
+        tree, mine, index = None, [], None
         for _ in range(40):
             tree = uia.a11y_tree({"scope": "all"})
-            assert tree["ok"]
-            found = next((e for e in tree["elements"] if e["name"] == "Smoke OK"), None)
-            if found:
+            assert tree["ok"], tree
+            index = next((i for i, w in enumerate(tree["windows"]) if w["title"] == title), None)
+            mine = [e for e in tree["elements"] if e["window"] == index] if index is not None else []
+            if any(e["name"] == "OK" for e in mine):
                 break
             time.sleep(0.25)
-        assert found, [w["title"] for w in tree["windows"]]
-        assert found["role"] == "push button" and found["rect"][2] > 0
-        info = uia.a11y_do({"op": "a11y-do", "path": found["path"], "role": found["role"], "name": found["name"], "do": "read"})
-        assert info["ok"] and info["name"] == "Smoke OK"
+        seen = [(e["role"], e["name"], e["rect"], e.get("where")) for e in mine]
+        assert index is not None, [w["title"] for w in tree["windows"]]
+        ok = next((e for e in mine if e["name"] == "OK"), None)
+        assert ok, seen
+        assert ok["role"] == "push button" and "invoke" in ok["actions"] and "where" not in ok, seen
+        assert ok["path"][0] == tree["windows"][index]["path"][0]
+        x, y, w, h = ok["rect"]
+        wx, wy, ww, wh = tree["windows"][index]["screen"]
+        assert w > 0 and h > 0 and wx <= x and x + w <= wx + ww and wy <= y and y + h <= wy + wh, (ok, tree["windows"][index])
+        body = next((e for e in mine if e["name"] == "Smoke body text"), None)
+        assert body and body["role"] == "label", seen
+
+        def do(element, what, **extra):
+            return uia.a11y_do({"op": "a11y-do", "path": element["path"], "role": element["role"],
+                                "name": element["name"], "do": what, **extra})
+
+        assert do(body, "read").get("text") == "Smoke body text"
+        assert do({**ok, "name": "Cancel"}, "press")["error"] == "stale"
+        assert proc.poll() is None  # the stale press did nothing
+        assert do(ok, "press") == {"ok": True, "did": "invoke"}
+        assert proc.wait(timeout=10) == 0  # Invoke on OK closed the box
     finally:
-        proc.kill()
+        if proc.poll() is None:
+            proc.kill()
